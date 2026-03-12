@@ -19,10 +19,17 @@ export const invoiceImportService = {
     return data
   },
 
-  async categorize(transactionId, categoryId) {
-    const { data } = await api.put(`/invoice-import/transactions/${transactionId}/categorize`, {
-      category_id: categoryId,
-    })
+  async previewKeywords(description) {
+    const { data } = await api.post('/invoice-import/preview-keywords', { description })
+    return data
+  },
+
+  async categorize(transactionId, categoryId, keywords = null) {
+    const payload = { category_id: categoryId }
+    if (keywords && keywords.length > 0) {
+      payload.keywords = keywords
+    }
+    const { data } = await api.put(`/invoice-import/transactions/${transactionId}/categorize`, payload)
     return data
   },
 }

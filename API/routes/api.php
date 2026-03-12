@@ -34,6 +34,7 @@ Route::middleware('auth:sanctum')->group(function () {
     
     // Invoice Import routes
     Route::post('/invoice-import/upload', [InvoiceImportController::class, 'upload']);
+    Route::post('/invoice-import/preview-keywords', [InvoiceImportController::class, 'previewKeywords']);
     Route::get('/invoice-import/pending', [InvoiceImportController::class, 'getPending']);
     Route::put('/invoice-import/transactions/{transaction}/categorize', [InvoiceImportController::class, 'categorize']);
 });

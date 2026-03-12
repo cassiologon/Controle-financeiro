@@ -58,6 +58,7 @@
               description: transaction.description,
               amount: formatCurrency(transaction.amount)
             }"
+            @category-created="emit('category-created', $event)"
           />
           <Button
             variant="primary"
@@ -69,7 +70,43 @@
             Categorizar
           </Button>
         </div>
-        <div class="flex items-center justify-end">
+        <!-- Palavras-chave que serão adicionadas à categoria -->
+        <div v-if="selectedCategoryId" class="mt-3 space-y-2">
+          <label class="text-xs font-medium text-gray-500">
+            Palavras-chave para a categoria
+          </label>
+          <div v-if="loadingKeywords" class="text-xs text-gray-400">
+            Carregando...
+          </div>
+          <div v-else class="flex flex-wrap gap-2 items-center">
+            <span
+              v-for="(kw, idx) in keywordsToAdd"
+              :key="idx"
+              class="inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium bg-primary-100 text-primary-700"
+            >
+              {{ kw }}
+              <button
+                type="button"
+                @click="removeKeyword(idx)"
+                class="hover:bg-primary-200 rounded p-0.5 transition-colors"
+                aria-label="Remover"
+              >
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </span>
+            <input
+              v-model="newKeywordInput"
+              type="text"
+              placeholder="+ Adicionar"
+              class="w-24 px-2 py-1 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              @keydown="onKeywordInputKeydown"
+              @blur="addKeyword"
+            />
+          </div>
+        </div>
+        <div class="flex items-center justify-end mt-3">
           <button
             @click="handleDelete"
             class="p-2 rounded-xl text-red-500 hover:text-red-700 hover:bg-red-50 transition-all text-sm font-medium"
@@ -93,9 +130,8 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { invoiceImportService } from '@/services/invoiceImportService'
-import { categoryService } from '@/services/categoryService'
 import CategorySelect from '@/components/CategorySelect.vue'
 import Button from '@/components/Button.vue'
 
@@ -111,20 +147,61 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['categorized', 'delete'])
+const emit = defineEmits(['categorized', 'delete', 'category-created'])
 
 const selectedCategoryId = ref('')
+const keywordsToAdd = ref([])
+const newKeywordInput = ref('')
+const loadingKeywords = ref(false)
 const categorizing = ref(false)
 const error = ref(null)
 
-const categoryOptions = props.categories
-  .filter(cat => cat.type === 'expense')
-  .map(cat => ({
-    id: cat.id,
-    name: cat.name,
-    icon: cat.icon || '📁',
-    color: cat.color || '#6366f1'
-  }))
+// Carrega preview das keywords quando seleciona categoria
+watch([() => props.transaction.description, selectedCategoryId], async ([description, categoryId]) => {
+  if (!categoryId || !description?.trim()) {
+    keywordsToAdd.value = []
+    return
+  }
+  loadingKeywords.value = true
+  try {
+    const { keywords } = await invoiceImportService.previewKeywords(description)
+    keywordsToAdd.value = [...(keywords || [])]
+  } catch {
+    keywordsToAdd.value = []
+  } finally {
+    loadingKeywords.value = false
+  }
+}, { immediate: true })
+
+function addKeyword() {
+  const kw = newKeywordInput.value?.trim()?.toLowerCase()
+  if (kw && kw.length > 3 && !keywordsToAdd.value.includes(kw)) {
+    keywordsToAdd.value = [...keywordsToAdd.value, kw]
+    newKeywordInput.value = ''
+  }
+}
+
+function removeKeyword(index) {
+  keywordsToAdd.value = keywordsToAdd.value.filter((_, i) => i !== index)
+}
+
+function onKeywordInputKeydown(e) {
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    addKeyword()
+  }
+}
+
+const categoryOptions = computed(() =>
+  props.categories
+    .filter(cat => cat.type === 'expense')
+    .map(cat => ({
+      id: cat.id,
+      name: cat.name,
+      icon: cat.icon || '📁',
+      color: cat.color || '#6366f1'
+    }))
+)
 
 async function handleCategorize() {
   if (!selectedCategoryId.value || selectedCategoryId.value === '') {
@@ -136,7 +213,11 @@ async function handleCategorize() {
   error.value = null
 
   try {
-    const response = await invoiceImportService.categorize(props.transaction.id, selectedCategoryId.value)
+    const response = await invoiceImportService.categorize(
+      props.transaction.id,
+      selectedCategoryId.value,
+      keywordsToAdd.value.length > 0 ? keywordsToAdd.value : null
+    )
     
     // Coleta todos os IDs: a transação original + as categorizadas automaticamente
     const categorizedIds = [props.transaction.id]

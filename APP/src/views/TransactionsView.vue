@@ -192,6 +192,7 @@
           :categories="categories"
           @categorized="handleCategorized"
           @delete="deletePendingTransaction"
+          @category-created="loadCategories"
         />
       </div>
     </Card>
@@ -357,7 +358,7 @@
             <input
               ref="fileInput"
               type="file"
-              accept=".pdf,.csv"
+              accept="application/pdf,.pdf,text/csv,.csv"
               @change="handleFileSelect"
               class="hidden"
             />
@@ -369,7 +370,7 @@
               </div>
               <div>
                 <p class="text-gray-700 font-semibold mb-1">Arraste o arquivo aqui ou clique para selecionar</p>
-                <p class="text-sm text-gray-500">Formatos aceitos: PDF (Mercado Pago) ou CSV (Nubank)</p>
+                <p class="text-sm text-gray-500">Formatos aceitos: PDF (Mercado Pago e Santander) ou CSV (Nubank)</p>
               </div>
               <Button variant="primary" @click="$refs.fileInput.click()">
                 Selecionar Arquivo
@@ -529,9 +530,18 @@ const bankOptions = [
 
 const bankFilterOptions = computed(() => {
   const options = [{ value: '', label: 'Todos os bancos' }]
+  const defaultBanks = ['Nubank', 'Mercado Pago', 'Itaú', 'Bradesco', 'Santander']
+  
   banks.value.forEach(bank => {
     options.push({ value: bank, label: bank })
   })
+  
+  defaultBanks.forEach(bank => {
+    if (!banks.value.includes(bank)) {
+      options.push({ value: bank, label: bank })
+    }
+  })
+  
   return options
 })
 

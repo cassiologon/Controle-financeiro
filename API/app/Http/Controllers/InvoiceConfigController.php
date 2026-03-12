@@ -80,11 +80,21 @@ class InvoiceConfigController extends Controller
         foreach ($configs as $config) {
             [$periodStart, $periodEnd] = $this->calculateBillingPeriod($today, $config->closing_day);
 
-            $total = Transaction::where('user_id', $request->user()->id)
+            $transactions = Transaction::where('user_id', $request->user()->id)
                 ->where('bank_name', $config->bank_name)
-                ->where('type', 'expense')
+                ->whereIn('type', ['expense', 'income'])
                 ->whereBetween('date', [$periodStart->toDateString(), $periodEnd->toDateString()])
+                ->get(['type', 'amount']);
+
+            $totalExpenses = (float) $transactions
+                ->where('type', 'expense')
                 ->sum('amount');
+
+            $totalIncome = (float) $transactions
+                ->where('type', 'income')
+                ->sum('amount');
+
+            $total = $totalExpenses - $totalIncome;
 
             $summaries[] = [
                 'id' => $config->id,

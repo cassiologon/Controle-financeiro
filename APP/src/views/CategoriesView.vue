@@ -196,7 +196,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { categoryService } from '@/services/categoryService'
 import Card from '@/components/Card.vue'
 import Button from '@/components/Button.vue'
@@ -230,6 +230,16 @@ const form = ref({
 })
 
 const errors = ref({})
+
+function getRandomColor() {
+  return '#' + Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0')
+}
+
+watch(showModal, (visible) => {
+  if (visible && !editingCategory.value) {
+    form.value.color = getRandomColor()
+  }
+})
 
 const keywordsString = computed(() => {
   if (!form.value.keywords || !Array.isArray(form.value.keywords)) {
@@ -296,7 +306,7 @@ function closeModal() {
     name: '',
     type: 'expense',
     icon: '',
-    color: '#6366f1',
+    color: getRandomColor(),
     keywords: [],
   }
   errors.value = {}

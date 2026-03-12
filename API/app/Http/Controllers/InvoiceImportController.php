@@ -26,30 +26,34 @@ class InvoiceImportController extends Controller
         try {
             $user = $request->user();
             $file = $request->file('file');
-            
+
             // Cria diretório para o usuário se não existir
             $userDir = "invoice-imports/{$user->id}";
-            
+
             // Cria o diretório manualmente em storage/app/ (não storage/app/private)
             $fullDir = storage_path('app/' . $userDir);
             if (!is_dir($fullDir)) {
                 mkdir($fullDir, 0755, true);
             }
-            
+
             // Salva arquivo temporário diretamente em storage/app/
             $filename = time() . '-' . $file->getClientOriginalName();
             $filePath = $userDir . '/' . $filename;
             $file->move($fullDir, $filename);
-            
-            // Dispara job para processar em background
-            ProcessInvoiceImport::dispatch($filePath, $user->id, $validated['bank_name']);
-            
+
+            // Em ambiente local, processa imediatamente (sem precisar do queue worker)
+            if (app()->environment('local')) {
+                ProcessInvoiceImport::dispatchSync($filePath, $user->id, $validated['bank_name']);
+            } else {
+                ProcessInvoiceImport::dispatch($filePath, $user->id, $validated['bank_name']);
+            }
+
             Log::info("Arquivo enviado para processamento", [
                 'user_id' => $user->id,
                 'file_path' => $filePath,
                 'bank_name' => $validated['bank_name'],
             ]);
-            
+
             return response()->json([
                 'message' => 'Arquivo enviado para processamento',
                 'status' => 'processing',
@@ -60,6 +64,21 @@ class InvoiceImportController extends Controller
                 'message' => 'Erro ao processar arquivo: ' . $e->getMessage(),
             ], 500);
         }
+    }
+
+    /**
+     * Preview das palavras-chave que seriam extraídas da descrição
+     */
+    public function previewKeywords(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'description' => 'required|string|max:500',
+        ]);
+
+        $keywordExtractor = app(KeywordExtractorService::class);
+        $keywords = $keywordExtractor->extractSignificantWords($validated['description']);
+
+        return response()->json(['keywords' => $keywords]);
     }
 
     /**
@@ -97,6 +116,8 @@ class InvoiceImportController extends Controller
 
         $validated = $request->validate([
             'category_id' => 'required|exists:categories,id',
+            'keywords' => 'sometimes|array',
+            'keywords.*' => 'string|max:100',
         ]);
 
         // Valida que a categoria pertence ao usuário
@@ -111,16 +132,17 @@ class InvoiceImportController extends Controller
             'status' => 'categorized',
         ]);
 
-        // Extrai palavras significativas da descrição e adiciona às keywords da categoria
+        // Extrai ou usa palavras-chave e adiciona às keywords da categoria
         // Apenas para categorias de despesa
         if ($category->type === 'expense' && !empty($transaction->description)) {
             try {
-                $keywordExtractor = app(KeywordExtractorService::class);
-                $significantWords = $keywordExtractor->extractSignificantWords($transaction->description);
-                
+                $significantWords = isset($validated['keywords']) && !empty($validated['keywords'])
+                    ? array_values(array_filter(array_map('trim', $validated['keywords'])))
+                    : app(KeywordExtractorService::class)->extractSignificantWords($transaction->description);
+
                 if (!empty($significantWords)) {
                     $category->addKeywords($significantWords);
-                    
+
                     Log::info("Keywords adicionadas automaticamente à categoria", [
                         'category_id' => $category->id,
                         'category_name' => $category->name,
@@ -139,7 +161,7 @@ class InvoiceImportController extends Controller
 
         // Categoriza automaticamente outras transações pendentes
         $autoCategorizedIds = [];
-        
+
         try {
             // 1. Categoriza transações com a mesma descrição exata
             $sameDescriptionTransactions = Transaction::where('user_id', $request->user()->id)
@@ -170,11 +192,11 @@ class InvoiceImportController extends Controller
             // 2. Categoriza transações pendentes que se encaixam nas keywords da categoria
             // Recarrega a categoria para ter as keywords atualizadas (caso tenham sido adicionadas acima)
             $category->refresh();
-            
+
             // Verifica se a categoria tem keywords antes de fazer o matching
             if ($category->keywords && is_array($category->keywords) && count($category->keywords) > 0) {
                 $matcherService = app(CategoryMatcherService::class);
-                
+
                 // Busca todas as transações pendentes do usuário (exceto a original e as já categorizadas por nome)
                 $pendingTransactions = Transaction::where('user_id', $request->user()->id)
                     ->where('status', 'pending')
@@ -183,7 +205,7 @@ class InvoiceImportController extends Controller
                     ->get();
 
                 $keywordMatchedIds = [];
-                
+
                 foreach ($pendingTransactions as $pendingTransaction) {
                     // Verifica se a descrição da transação pendente se encaixa nas keywords da categoria específica
                     if ($matcherService->matchesCategory($pendingTransaction->description, $category)) {
@@ -191,7 +213,7 @@ class InvoiceImportController extends Controller
                             'category_id' => $category->id,
                             'status' => 'categorized',
                         ]);
-                        
+
                         $keywordMatchedIds[] = $pendingTransaction->id;
                     }
                 }

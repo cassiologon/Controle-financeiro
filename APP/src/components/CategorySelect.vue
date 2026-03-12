@@ -74,6 +74,18 @@
 
       <div class="max-h-[60vh] overflow-y-auto">
         <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+          <!-- Atalho Nova Categoria -->
+          <div
+            class="px-4 py-4 flex flex-col items-center gap-2 cursor-pointer transition-all duration-200 rounded-xl border-2 border-dashed border-gray-300 hover:border-primary-400 hover:bg-primary-50/50 hover:shadow-md"
+            @click="showCreateModal = true"
+          >
+            <div class="w-16 h-16 rounded-xl flex items-center justify-center bg-gray-100 text-gray-500 hover:text-primary-500 transition-colors">
+              <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+              </svg>
+            </div>
+            <span class="font-medium text-gray-600 text-sm text-center">Nova categoria</span>
+          </div>
           <div
             v-for="category in categories"
             :key="category.id"
@@ -121,6 +133,14 @@
       </div>
     </Modal>
 
+    <!-- Modal Nova Categoria -->
+    <CategoryFormModal
+      :show="showCreateModal"
+      default-type="expense"
+      @close="showCreateModal = false"
+      @saved="onCategoryCreated"
+    />
+
     <!-- Error Message -->
     <p v-if="error" class="mt-1 text-sm text-error-600">{{ error }}</p>
   </div>
@@ -129,6 +149,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import Modal from './Modal.vue'
+import CategoryFormModal from './CategoryFormModal.vue'
 
 const props = defineProps({
   id: String,
@@ -152,9 +173,10 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['update:modelValue'])
+const emit = defineEmits(['update:modelValue', 'category-created'])
 
 const showModal = ref(false)
+const showCreateModal = ref(false)
 
 const selectedCategoryId = computed({
   get: () => props.modelValue,
@@ -169,6 +191,12 @@ const selectedCategory = computed(() => {
 function selectCategory(category) {
   selectedCategoryId.value = category.id
   showModal.value = false
+}
+
+function onCategoryCreated(category) {
+  showCreateModal.value = false
+  selectedCategoryId.value = category.id
+  emit('category-created', category)
 }
 </script>
 

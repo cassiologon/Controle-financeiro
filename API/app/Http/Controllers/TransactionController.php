@@ -49,7 +49,8 @@ class TransactionController extends Controller
         $applyFilters($query);
 
         // Calcula totais de todas as transações que correspondem aos filtros
-        // Inicializa totais
+        // Receitas vinculadas a banco representam estornos/ajustes de fatura,
+        // então não entram como receita e passam a abater o total de despesas.
         $totalIncome = 0;
         $totalExpense = 0;
         $totalIncomeCount = 0;
@@ -67,6 +68,7 @@ class TransactionController extends Controller
             } elseif ($request->type === 'income') {
                 $incomeQuery = Transaction::where('user_id', $request->user()->id)
                     ->where('type', 'income')
+                    ->whereNull('bank_name')
                     ->whereNotNull('amount');
                 $applyFilters($incomeQuery, false); // Aplica todos os filtros incluindo tipo
                 $totalIncome = (float) ($incomeQuery->sum('amount') ?? 0);
@@ -76,6 +78,7 @@ class TransactionController extends Controller
             // Sem filtro de tipo, calcula ambos separadamente
             $incomeQuery = Transaction::where('user_id', $request->user()->id)
                 ->where('type', 'income')
+                ->whereNull('bank_name')
                 ->whereNotNull('amount');
             $applyFilters($incomeQuery, true); // true = exclui filtro de tipo
             $totalIncome = (float) ($incomeQuery->sum('amount') ?? 0);
@@ -85,7 +88,14 @@ class TransactionController extends Controller
                 ->where('type', 'expense')
                 ->whereNotNull('amount');
             $applyFilters($expenseQuery, true); // true = exclui filtro de tipo
-            $totalExpense = (float) ($expenseQuery->sum('amount') ?? 0);
+            $bankAdjustmentQuery = Transaction::where('user_id', $request->user()->id)
+                ->where('type', 'income')
+                ->whereNotNull('bank_name')
+                ->whereNotNull('amount');
+            $applyFilters($bankAdjustmentQuery, true); // Aplica os mesmos filtros sem tratar como receita
+
+            $totalExpense = (float) ($expenseQuery->sum('amount') ?? 0)
+                - (float) ($bankAdjustmentQuery->sum('amount') ?? 0);
             $totalExpenseCount = $expenseQuery->count();
         }
 

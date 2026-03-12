@@ -7,7 +7,6 @@ use App\Models\Budget;
 use App\Models\RecurringTransaction;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Support\Facades\DB;
 
 class DashboardController extends Controller
 {
@@ -19,6 +18,7 @@ class DashboardController extends Controller
 
         $transactions = Transaction::where('user_id', $userId)
             ->whereBetween('date', [$startDate, $endDate])
+            ->with('category:id,name,icon,color')
             ->get();
 
         $recurringBills = RecurringTransaction::where('user_id', $userId)
@@ -27,37 +27,51 @@ class DashboardController extends Controller
             ->where(function ($q) use ($startDate) {
                 $q->whereNull('end_date')->orWhere('end_date', '>=', $startDate);
             })
+            ->with('category:id,name,icon,color')
             ->get();
 
         $recurringIncome = $recurringBills->where('type', 'income')->sum('amount');
         $recurringExpense = $recurringBills->where('type', 'expense')->sum('amount');
 
-        $totalIncome = $transactions->where('type', 'income')->sum('amount') + $recurringIncome;
-        $totalExpense = $transactions->where('type', 'expense')->sum('amount') + $recurringExpense;
+        $isBankAdjustment = fn ($transaction) => $transaction->type === 'income' && !empty($transaction->bank_name);
+        $effectiveType = fn ($transaction) => $isBankAdjustment($transaction) ? 'expense' : $transaction->type;
+        $effectiveAmount = fn ($transaction) => $isBankAdjustment($transaction)
+            ? -((float) $transaction->amount)
+            : (float) $transaction->amount;
+
+        $totalIncome = $transactions
+            ->filter(fn ($transaction) => $transaction->type === 'income' && empty($transaction->bank_name))
+            ->sum(fn ($transaction) => (float) $transaction->amount) + $recurringIncome;
+
+        $totalExpense = $transactions
+            ->filter(fn ($transaction) => $effectiveType($transaction) === 'expense')
+            ->sum(fn ($transaction) => $effectiveAmount($transaction)) + $recurringExpense;
+
         $balance = $totalIncome - $totalExpense;
 
-        $transactionsByCategory = Transaction::where('user_id', $userId)
-            ->whereBetween('date', [$startDate, $endDate])
-            ->select('category_id', 'type', DB::raw('SUM(amount) as total'))
-            ->groupBy('category_id', 'type')
-            ->get()
-            ->map(function ($item) {
-                $category = \App\Models\Category::find($item->category_id);
-                return [
-                    'category_id' => $item->category_id,
-                    'type' => $item->type,
-                    'total' => (float) $item->total,
+        $transactionsByCategory = [];
+
+        foreach ($transactions as $transaction) {
+            $resolvedType = $effectiveType($transaction);
+            $key = ($transaction->category_id ?? 'null') . '-' . $resolvedType;
+
+            if (!isset($transactionsByCategory[$key])) {
+                $transactionsByCategory[$key] = [
+                    'category_id' => $transaction->category_id,
+                    'type' => $resolvedType,
+                    'total' => 0.0,
                     'recurring_total' => 0.0,
-                    'category' => $category ? [
-                        'id' => $category->id,
-                        'name' => $category->name,
-                        'icon' => $category->icon,
-                        'color' => $category->color,
+                    'category' => $transaction->category ? [
+                        'id' => $transaction->category->id,
+                        'name' => $transaction->category->name,
+                        'icon' => $transaction->category->icon,
+                        'color' => $transaction->category->color,
                     ] : null,
                 ];
-            })
-            ->keyBy(fn ($item) => $item['category_id'] . '-' . $item['type'])
-            ->toArray();
+            }
+
+            $transactionsByCategory[$key]['total'] += $effectiveAmount($transaction);
+        }
 
         foreach ($recurringBills as $bill) {
             $key = $bill->category_id . '-' . $bill->type;
@@ -65,17 +79,16 @@ class DashboardController extends Controller
                 $transactionsByCategory[$key]['total'] = (float) $transactionsByCategory[$key]['total'] + (float) $bill->amount;
                 $transactionsByCategory[$key]['recurring_total'] = (float) ($transactionsByCategory[$key]['recurring_total'] ?? 0) + (float) $bill->amount;
             } else {
-                $category = \App\Models\Category::find($bill->category_id);
                 $transactionsByCategory[$key] = [
                     'category_id' => $bill->category_id,
                     'type' => $bill->type,
                     'total' => (float) $bill->amount,
                     'recurring_total' => (float) $bill->amount,
-                    'category' => $category ? [
-                        'id' => $category->id,
-                        'name' => $category->name,
-                        'icon' => $category->icon,
-                        'color' => $category->color,
+                    'category' => $bill->category ? [
+                        'id' => $bill->category->id,
+                        'name' => $bill->category->name,
+                        'icon' => $bill->category->icon,
+                        'color' => $bill->category->color,
                     ] : null,
                 ];
             }
@@ -83,51 +96,59 @@ class DashboardController extends Controller
 
         $transactionsByCategory = array_values($transactionsByCategory);
 
-        $dailyExpenses = Transaction::where('user_id', $userId)
-            ->whereBetween('date', [$startDate, $endDate])
-            ->where('type', 'expense')
-            ->select('date', DB::raw('SUM(amount) as total'))
-            ->groupBy('date')
-            ->orderBy('date')
-            ->get()
-            ->map(function ($row) {
-                $date = $row->date;
-                $dateStr = $date instanceof \DateTimeInterface ? $date->format('Y-m-d') : (string) $date;
-                return ['date' => $dateStr, 'total' => (float) $row->total];
+        $dailyExpenses = $transactions
+            ->filter(fn ($transaction) => $effectiveType($transaction) === 'expense')
+            ->groupBy(function ($transaction) {
+                $date = $transaction->date;
+                return $date instanceof \DateTimeInterface ? $date->format('Y-m-d') : (string) $date;
             })
+            ->map(function ($dayTransactions, $date) use ($effectiveAmount) {
+                return ['date' => $date, 'total' => (float) $dayTransactions->sum(fn ($transaction) => $effectiveAmount($transaction))];
+            })
+            ->sortBy('date')
             ->values()
             ->toArray();
 
-        $monthlyData = Transaction::where('user_id', $userId)
+        $monthlyTransactions = Transaction::where('user_id', $userId)
             ->whereBetween('date', [now()->subMonths(11)->startOfMonth()->toDateString(), $endDate])
-            ->select(
-                DB::raw("TO_CHAR(date, 'YYYY-MM') as month"),
-                'type',
-                DB::raw('SUM(amount) as total')
-            )
-            ->groupBy(DB::raw("TO_CHAR(date, 'YYYY-MM')"), 'type')
-            ->orderBy(DB::raw("TO_CHAR(date, 'YYYY-MM')"))
-            ->get();
+            ->get(['date', 'type', 'amount', 'bank_name']);
+
+        $monthlyData = $monthlyTransactions
+            ->groupBy(fn ($t) => \Carbon\Carbon::parse($t->date)->format('Y-m'))
+            ->flatMap(fn ($monthGroup, $month) => $monthGroup->groupBy(
+                fn ($transaction) => $transaction->type === 'income' && !empty($transaction->bank_name) ? 'expense' : $transaction->type
+            )->map(
+                fn ($typeGroup, $type) => [
+                    'month' => $month,
+                    'type' => $type,
+                    'total' => (float) $typeGroup->sum(
+                        fn ($transaction) => $transaction->type === 'income' && !empty($transaction->bank_name)
+                            ? -((float) $transaction->amount)
+                            : (float) $transaction->amount
+                    ),
+                ]
+            )->values())
+            ->sortBy('month')
+            ->values();
 
         $budgets = Budget::where('user_id', $userId)
             ->where('month', now()->month)
             ->where('year', now()->year)
             ->with('category:id,name,icon,color')
             ->get()
-            ->map(function ($budget) use ($userId, $startDate, $endDate) {
-                $spent = Transaction::where('user_id', $userId)
-                    ->where('category_id', $budget->category_id)
-                    ->where('type', 'expense')
-                    ->whereBetween('date', [$startDate, $endDate])
-                    ->sum('amount');
-                
+            ->map(function ($budget) use ($transactions, $effectiveType, $effectiveAmount) {
+                $spent = $transactions
+                    ->filter(fn ($transaction) => $transaction->category_id === $budget->category_id)
+                    ->filter(fn ($transaction) => $effectiveType($transaction) === 'expense')
+                    ->sum(fn ($transaction) => $effectiveAmount($transaction));
+
                 return [
                     'id' => $budget->id,
                     'category' => $budget->category,
-                    'budget_amount' => $budget->amount,
-                    'spent_amount' => $spent,
-                    'remaining' => $budget->amount - $spent,
-                    'percentage' => $budget->amount > 0 ? ($spent / $budget->amount) * 100 : 0,
+                    'budget_amount' => (float) $budget->amount,
+                    'spent_amount' => (float) $spent,
+                    'remaining' => (float) $budget->amount - (float) $spent,
+                    'percentage' => $budget->amount > 0 ? ((float) $spent / (float) $budget->amount) * 100 : 0,
                 ];
             });
 
