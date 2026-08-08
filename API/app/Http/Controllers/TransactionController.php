@@ -3,42 +3,74 @@
 namespace App\Http\Controllers;
 
 use App\Models\Transaction;
+use App\Services\InvoiceParserService;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 
 class TransactionController extends Controller
 {
+    private function getFilterValue(Request $request, string $key): mixed
+    {
+        $queryValue = $request->query($key);
+        if ($queryValue !== null && $queryValue !== '') {
+            return $queryValue;
+        }
+
+        $inputValue = $request->input($key);
+        if ($inputValue !== null && $inputValue !== '') {
+            return $inputValue;
+        }
+
+        return null;
+    }
+
+    private function applyTransactionFilters($query, Request $request, bool $excludeType = false)
+    {
+        $type = $this->getFilterValue($request, 'type');
+        $categoryId = $this->getFilterValue($request, 'category_id');
+        $startDate = $this->getFilterValue($request, 'start_date');
+        $endDate = $this->getFilterValue($request, 'end_date');
+        $search = $this->getFilterValue($request, 'search');
+        $bankName = $this->getFilterValue($request, 'bank_name');
+        $isInstallment = $this->getFilterValue($request, 'is_installment');
+
+        if (!$excludeType && $type !== null) {
+            $query->where('type', $type);
+        }
+
+        if ($categoryId !== null) {
+            $query->where('category_id', $categoryId);
+        }
+
+        if ($startDate !== null && $endDate !== null) {
+            $query->whereBetween('date', [$startDate, $endDate]);
+        } elseif ($startDate !== null) {
+            $query->where('date', '>=', $startDate);
+        } elseif ($endDate !== null) {
+            $query->where('date', '<=', $endDate);
+        }
+
+        if ($search !== null) {
+            $query->whereRaw('LOWER(description) LIKE ?', ['%' . strtolower($search) . '%']);
+        }
+
+        if ($bankName !== null) {
+            $query->where('bank_name', $bankName);
+        }
+
+        if ($isInstallment !== null) {
+            $isInstallmentBool = filter_var($isInstallment, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+            if ($isInstallmentBool !== null) {
+                $query->where('is_installment', $isInstallmentBool);
+            }
+        }
+
+        return $query;
+    }
+
     public function index(Request $request): JsonResponse
     {
-        // Função auxiliar para aplicar filtros (exceto tipo, que é aplicado separadamente)
-        $applyFilters = function ($query, $excludeType = false) use ($request) {
-            if (!$excludeType && $request->has('type')) {
-                $query->where('type', $request->type);
-            }
-
-            if ($request->has('category_id')) {
-                $query->where('category_id', $request->category_id);
-            }
-
-            if ($request->has('start_date') && $request->has('end_date')) {
-                $query->whereBetween('date', [$request->start_date, $request->end_date]);
-            } elseif ($request->has('start_date')) {
-                $query->where('date', '>=', $request->start_date);
-            } elseif ($request->has('end_date')) {
-                $query->where('date', '<=', $request->end_date);
-            }
-
-            if ($request->has('search')) {
-                $query->whereRaw('LOWER(description) LIKE ?', ['%' . strtolower($request->search) . '%']);
-            }
-
-            if ($request->has('bank_name')) {
-                $query->where('bank_name', $request->bank_name);
-            }
-
-            return $query;
-        };
-
         // Query para paginação
         $query = Transaction::where('user_id', $request->user()->id)
             ->with('category')
@@ -46,7 +78,7 @@ class TransactionController extends Controller
             ->orderBy('created_at', 'desc')
             ->orderBy('id', 'desc');
 
-        $applyFilters($query);
+        $this->applyTransactionFilters($query, $request);
 
         // Calcula totais de todas as transações que correspondem aos filtros
         // Receitas vinculadas a banco representam estornos/ajustes de fatura,
@@ -57,20 +89,22 @@ class TransactionController extends Controller
         $totalExpenseCount = 0;
         
         // Se há filtro de tipo, calcula apenas o tipo filtrado
-        if ($request->has('type')) {
-            if ($request->type === 'expense') {
+        $type = $this->getFilterValue($request, 'type');
+
+        if ($type !== null) {
+            if ($type === 'expense') {
                 $expenseQuery = Transaction::where('user_id', $request->user()->id)
                     ->where('type', 'expense')
                     ->whereNotNull('amount');
-                $applyFilters($expenseQuery, false); // Aplica todos os filtros incluindo tipo
+                $this->applyTransactionFilters($expenseQuery, $request, false); // Aplica todos os filtros incluindo tipo
                 $totalExpense = (float) ($expenseQuery->sum('amount') ?? 0);
                 $totalExpenseCount = $expenseQuery->count();
-            } elseif ($request->type === 'income') {
+            } elseif ($type === 'income') {
                 $incomeQuery = Transaction::where('user_id', $request->user()->id)
                     ->where('type', 'income')
                     ->whereNull('bank_name')
                     ->whereNotNull('amount');
-                $applyFilters($incomeQuery, false); // Aplica todos os filtros incluindo tipo
+                $this->applyTransactionFilters($incomeQuery, $request, false); // Aplica todos os filtros incluindo tipo
                 $totalIncome = (float) ($incomeQuery->sum('amount') ?? 0);
                 $totalIncomeCount = $incomeQuery->count();
             }
@@ -80,19 +114,19 @@ class TransactionController extends Controller
                 ->where('type', 'income')
                 ->whereNull('bank_name')
                 ->whereNotNull('amount');
-            $applyFilters($incomeQuery, true); // true = exclui filtro de tipo
+            $this->applyTransactionFilters($incomeQuery, $request, true); // true = exclui filtro de tipo
             $totalIncome = (float) ($incomeQuery->sum('amount') ?? 0);
             $totalIncomeCount = $incomeQuery->count();
             
             $expenseQuery = Transaction::where('user_id', $request->user()->id)
                 ->where('type', 'expense')
                 ->whereNotNull('amount');
-            $applyFilters($expenseQuery, true); // true = exclui filtro de tipo
+            $this->applyTransactionFilters($expenseQuery, $request, true); // true = exclui filtro de tipo
             $bankAdjustmentQuery = Transaction::where('user_id', $request->user()->id)
                 ->where('type', 'income')
                 ->whereNotNull('bank_name')
                 ->whereNotNull('amount');
-            $applyFilters($bankAdjustmentQuery, true); // Aplica os mesmos filtros sem tratar como receita
+            $this->applyTransactionFilters($bankAdjustmentQuery, $request, true); // Aplica os mesmos filtros sem tratar como receita
 
             $totalExpense = (float) ($expenseQuery->sum('amount') ?? 0)
                 - (float) ($bankAdjustmentQuery->sum('amount') ?? 0);
@@ -123,6 +157,9 @@ class TransactionController extends Controller
             'description' => 'required|string|max:255',
             'date' => 'required|date',
             'bank_name' => 'nullable|string|max:255',
+            'is_installment' => 'sometimes|boolean',
+            'current_installment' => 'nullable|integer|min:1',
+            'total_installments' => 'nullable|integer|min:1',
         ]);
 
         $category = \App\Models\Category::findOrFail($validated['category_id']);
@@ -131,14 +168,87 @@ class TransactionController extends Controller
             return response()->json(['message' => 'Unauthorized'], 403);
         }
 
-        $transaction = Transaction::create([
-            ...$validated,
+        $isInstallment = (bool) ($validated['is_installment'] ?? false);
+        $currentInstallment = $validated['current_installment'] ?? null;
+        $totalInstallments = $validated['total_installments'] ?? null;
+
+        if ($isInstallment && ($currentInstallment === null || $totalInstallments === null)) {
+            return response()->json([
+                'message' => 'Campos de parcelamento inválidos.',
+                'errors' => [
+                    'current_installment' => ['Informe a parcela atual.'],
+                    'total_installments' => ['Informe o total de parcelas.'],
+                ],
+            ], 422);
+        }
+
+        if ($isInstallment && $currentInstallment > $totalInstallments) {
+            return response()->json([
+                'message' => 'Campos de parcelamento inválidos.',
+                'errors' => [
+                    'current_installment' => ['A parcela atual deve ser menor ou igual ao total de parcelas.'],
+                ],
+            ], 422);
+        }
+
+        if (!$isInstallment) {
+            $transaction = Transaction::create([
+                ...$validated,
+                'is_installment' => false,
+                'user_id' => $request->user()->id,
+            ]);
+
+            $transaction->load('category');
+
+            return response()->json($transaction, 201);
+        }
+
+        $parserService = app(InvoiceParserService::class);
+        $normalizedDescription = $parserService->buildInstallmentDescription(
+            $validated['description'],
+            (int) $currentInstallment,
+            (int) $totalInstallments
+        );
+        $baseDate = Carbon::parse($validated['date']);
+
+        $firstInstallment = Transaction::create([
             'user_id' => $request->user()->id,
+            'category_id' => $validated['category_id'],
+            'type' => $validated['type'],
+            'amount' => $validated['amount'],
+            'description' => $normalizedDescription,
+            'date' => $validated['date'],
+            'bank_name' => $validated['bank_name'] ?? null,
+            'is_installment' => true,
         ]);
 
-        $transaction->load('category');
+        for ($installmentNumber = $currentInstallment + 1; $installmentNumber <= $totalInstallments; $installmentNumber++) {
+            $monthsToAdd = $installmentNumber - $currentInstallment;
+            $futureDate = $baseDate->copy()->addMonthsNoOverflow($monthsToAdd)->toDateString();
+            $futureDescription = $parserService->buildInstallmentDescription(
+                $validated['description'],
+                $installmentNumber,
+                (int) $totalInstallments
+            );
 
-        return response()->json($transaction, 201);
+            Transaction::create([
+                'user_id' => $request->user()->id,
+                'category_id' => $validated['category_id'],
+                'type' => $validated['type'],
+                'amount' => $validated['amount'],
+                'description' => $futureDescription,
+                'date' => $futureDate,
+                'bank_name' => $validated['bank_name'] ?? null,
+                'is_installment' => true,
+            ]);
+        }
+
+        $firstInstallment->load('category');
+
+        return response()->json([
+            ...$firstInstallment->toArray(),
+            'installments_created' => ((int) $totalInstallments - (int) $currentInstallment) + 1,
+        ], 201);
     }
 
     public function show(Request $request, Transaction $transaction): JsonResponse
@@ -205,7 +315,9 @@ class TransactionController extends Controller
 
     public function deleteAll(Request $request): JsonResponse
     {
-        $deletedCount = Transaction::where('user_id', $request->user()->id)->delete();
+        $query = Transaction::where('user_id', $request->user()->id);
+        $this->applyTransactionFilters($query, $request);
+        $deletedCount = $query->delete();
 
         return response()->json([
             'message' => 'Todas as transações foram deletadas com sucesso',

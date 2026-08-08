@@ -10,6 +10,7 @@ use App\Http\Controllers\BudgetController;
 use App\Http\Controllers\RecurringTransactionController;
 use App\Http\Controllers\InvoiceImportController;
 use App\Http\Controllers\InvoiceConfigController;
+use App\Http\Controllers\InsightController;
 
 // Public routes
 Route::post('/auth/register', [AuthController::class, 'register']);
@@ -31,6 +32,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('invoice-configs', InvoiceConfigController::class);
 
     Route::get('/dashboard', [DashboardController::class, 'index']);
+    Route::get('/insights', [InsightController::class, 'show']);
+    Route::post('/insights', [InsightController::class, 'generate']);
     
     // Invoice Import routes
     Route::post('/invoice-import/upload', [InvoiceImportController::class, 'upload']);

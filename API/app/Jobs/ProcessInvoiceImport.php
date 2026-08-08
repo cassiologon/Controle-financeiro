@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Models\Transaction;
 use App\Services\InvoiceParserService;
 use App\Services\CategoryMatcherService;
+use Carbon\Carbon;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Log;
@@ -13,6 +14,14 @@ use Illuminate\Support\Facades\Storage;
 class ProcessInvoiceImport implements ShouldQueue
 {
     use Queueable;
+
+    /**
+     * Contagem de ocorrências por fingerprint durante a importação atual.
+     * Permite linhas idênticas no CSV (ex.: cobranças repetidas no extrato).
+     *
+     * @var array<string, int>
+     */
+    private array $importFingerprintCounts = [];
 
     /**
      * Create a new job instance.
@@ -101,34 +110,52 @@ class ProcessInvoiceImport implements ShouldQueue
                 Log::info("Nenhuma categoria com keywords encontrada. Todas as transações serão criadas como pendentes.");
             }
 
+            $this->importFingerprintCounts = [];
+
             // Processa cada transação
             foreach ($transactions as $transactionData) {
                 try {
+                    $description = trim($transactionData['description']);
+                    $installmentMetadata = $parserService->extractInstallmentMetadata($description);
+                    $isInstallment = $installmentMetadata !== null;
+                    $transactionType = in_array($transactionData['type'] ?? null, ['income', 'expense'], true)
+                        ? $transactionData['type']
+                        : 'expense';
+
+                    if ($isInstallment) {
+                        $description = $installmentMetadata['normalized_description'];
+                    }
+
                     $category = null;
                     
                     // Só tenta fazer match se houver categorias com keywords
-                    if ($hasKeywords) {
+                    if ($hasKeywords && $transactionType === 'expense') {
+                        $descriptionForMatch = $installmentMetadata['base_description'] ?? $description;
+
                         // Tenta encontrar categoria por palavras-chave
                         $category = $matcherService->matchCategory(
-                            $transactionData['description'],
+                            $descriptionForMatch,
                             $this->userId
                         );
                     }
 
-                    // Cria a transação
-                    $transaction = Transaction::create([
+                    // Cria a transação atual (evita duplicidade em reimportação)
+                    $basePayload = [
                         'user_id' => $this->userId,
                         'category_id' => $category?->id ?? null,
-                        'type' => 'expense', // Sempre despesa de cartão
+                        'type' => $transactionType,
                         'amount' => $transactionData['amount'],
-                        'description' => $transactionData['description'],
+                        'description' => $description,
                         'date' => $transactionData['date'],
                         'status' => $category ? 'categorized' : 'pending',
                         'bank_name' => $this->bankName,
-                    ]);
+                        'is_installment' => $isInstallment,
+                    ];
+
+                    $transaction = $this->createTransactionIfNotExists($basePayload);
                     
                     // Log para debug (apenas primeira transação)
-                    if ($processed === 0) {
+                    if ($transaction && $processed === 0) {
                         Log::info("Primeira transação criada com bank_name", [
                             'transaction_id' => $transaction->id,
                             'bank_name' => $transaction->bank_name,
@@ -136,11 +163,56 @@ class ProcessInvoiceImport implements ShouldQueue
                         ]);
                     }
 
-                    $processed++;
-                    if ($category) {
-                        $categorized++;
-                    } else {
-                        $pending++;
+                    if ($transaction) {
+                        $processed++;
+                        if ($category) {
+                            $categorized++;
+                        } else {
+                            $pending++;
+                        }
+                    }
+
+                    // Gera parcelas futuras quando a transação importada já é parcelada
+                    if ($isInstallment) {
+                        $currentInstallment = $installmentMetadata['current_installment'];
+                        $totalInstallments = $installmentMetadata['total_installments'];
+                        $baseDescription = $installmentMetadata['base_description'];
+
+                        if ($currentInstallment < $totalInstallments) {
+                            $baseDate = Carbon::parse($transactionData['date']);
+
+                            for ($installmentNumber = $currentInstallment + 1; $installmentNumber <= $totalInstallments; $installmentNumber++) {
+                                $monthsToAdd = $installmentNumber - $currentInstallment;
+                                $futureDate = $baseDate->copy()->addMonthsNoOverflow($monthsToAdd)->toDateString();
+                                $futureDescription = $parserService->buildInstallmentDescription(
+                                    $baseDescription,
+                                    $installmentNumber,
+                                    $totalInstallments
+                                );
+
+                                $futurePayload = [
+                                    'user_id' => $this->userId,
+                                    'category_id' => $category?->id ?? null,
+                                    'type' => $transactionType,
+                                    'amount' => $transactionData['amount'],
+                                    'description' => $futureDescription,
+                                    'date' => $futureDate,
+                                    'status' => $category ? 'categorized' : 'pending',
+                                    'bank_name' => $this->bankName,
+                                    'is_installment' => true,
+                                ];
+
+                                $futureTransaction = $this->createTransactionIfNotExists($futurePayload);
+                                if ($futureTransaction) {
+                                    $processed++;
+                                    if ($category) {
+                                        $categorized++;
+                                    } else {
+                                        $pending++;
+                                    }
+                                }
+                            }
+                        }
                     }
                 } catch (\Exception $e) {
                     Log::error("Erro ao processar transação: " . $e->getMessage(), [
@@ -171,5 +243,44 @@ class ProcessInvoiceImport implements ShouldQueue
             // Re-throw para que o Laravel possa registrar como falha
             throw $e;
         }
+    }
+
+    private function createTransactionIfNotExists(array $payload): ?Transaction
+    {
+        $fingerprint = $this->buildTransactionFingerprint($payload);
+        $this->importFingerprintCounts[$fingerprint] = ($this->importFingerprintCounts[$fingerprint] ?? 0) + 1;
+        $requiredCount = $this->importFingerprintCounts[$fingerprint];
+
+        $existingCount = $this->countExistingTransactions($payload);
+
+        if ($existingCount >= $requiredCount) {
+            return null;
+        }
+
+        return Transaction::create($payload);
+    }
+
+    private function buildTransactionFingerprint(array $payload): string
+    {
+        return implode('|', [
+            (string) $payload['user_id'],
+            (string) $payload['type'],
+            number_format((float) $payload['amount'], 2, '.', ''),
+            (string) $payload['description'],
+            (string) $payload['date'],
+            (string) $payload['bank_name'],
+        ]);
+    }
+
+    private function countExistingTransactions(array $payload): int
+    {
+        return Transaction::query()
+            ->where('user_id', $payload['user_id'])
+            ->where('type', $payload['type'])
+            ->where('amount', number_format((float) $payload['amount'], 2, '.', ''))
+            ->where('description', $payload['description'])
+            ->where('date', $payload['date'])
+            ->where('bank_name', $payload['bank_name'])
+            ->count();
     }
 }

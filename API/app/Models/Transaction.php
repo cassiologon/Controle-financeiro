@@ -20,12 +20,14 @@ class Transaction extends Model
         'date',
         'status',
         'bank_name',
+        'is_installment',
     ];
 
     protected $casts = [
         'amount' => 'decimal:2',
         'date' => 'date',
         'status' => 'string',
+        'is_installment' => 'boolean',
     ];
 
     public function user(): BelongsTo

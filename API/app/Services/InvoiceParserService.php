@@ -99,7 +99,7 @@ class InvoiceParserService
                 // Tenta identificar colunas comuns do Nubank
                 $date = $this->extractDate($normalized);
                 $description = $this->extractDescription($normalized);
-                $amount = $this->extractAmount($normalized);
+                $amount = $this->extractCsvAmountWithSign($normalized);
 
                 // Log das primeiras 3 linhas para debug
                 if ($rowCount <= 3) {
@@ -107,10 +107,13 @@ class InvoiceParserService
                 }
 
                 if ($date && $description && $amount !== null) {
+                    $type = $amount < 0 ? 'income' : 'expense';
+
                     $transactions[] = [
                         'date' => $date,
                         'description' => trim($description),
-                        'amount' => abs($amount), // Garante valor positivo para despesas
+                        'amount' => abs($amount),
+                        'type' => $type,
                     ];
                 } else {
                     // Log apenas as primeiras 3 linhas ignoradas para não poluir o log
@@ -1196,6 +1199,56 @@ public function parsePdf(string $filePath): array
     }
 
     /**
+     * Extrai metadados de parcelamento da descrição.
+     * Suporta formatos "Parcela X/Y" e "Parcela X de Y".
+     */
+    public function extractInstallmentMetadata(string $description): ?array
+    {
+        $normalizedDescription = preg_replace('/\s+/', ' ', trim($description));
+        if ($normalizedDescription === '') {
+            return null;
+        }
+
+        $pattern = '/^(.*?)(?:\s*[-–—]?\s*)?Parcela\s+(\d+)\s*(?:\/|de)\s*(\d+)\s*$/iu';
+        if (!preg_match($pattern, $normalizedDescription, $matches)) {
+            return null;
+        }
+
+        $currentInstallment = (int) $matches[2];
+        $totalInstallments = (int) $matches[3];
+
+        if ($currentInstallment < 1 || $totalInstallments < 1 || $currentInstallment > $totalInstallments) {
+            return null;
+        }
+
+        $baseDescription = trim($matches[1]);
+        $baseDescription = rtrim($baseDescription, " \t\n\r\0\x0B-–—");
+        $baseDescription = preg_replace('/\s+/', ' ', $baseDescription);
+
+        return [
+            'current_installment' => $currentInstallment,
+            'total_installments' => $totalInstallments,
+            'base_description' => $baseDescription,
+            'normalized_description' => $this->buildInstallmentDescription($baseDescription, $currentInstallment, $totalInstallments),
+        ];
+    }
+
+    /**
+     * Monta descrição padronizada para parcelas no formato "Parcela X/Y".
+     */
+    public function buildInstallmentDescription(string $baseDescription, int $currentInstallment, int $totalInstallments): string
+    {
+        $baseDescription = preg_replace('/\s+/', ' ', trim($baseDescription));
+        $suffix = "Parcela {$currentInstallment}/{$totalInstallments}";
+
+        if ($baseDescription === '') {
+            return $suffix;
+        }
+
+        return "{$baseDescription} - {$suffix}";
+    }
+
+    /**
      * Limpa e normaliza a descrição da transação
      */
     private function cleanDescription(string $description): string
@@ -1254,6 +1307,25 @@ public function parsePdf(string $filePath): array
         foreach ($amountKeys as $key) {
             if (isset($normalized[$key]) && !empty($normalized[$key])) {
                 $amount = $this->parseAmount($normalized[$key]);
+                if ($amount !== null) {
+                    return $amount;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Extrai valor do CSV preservando sinal para classificar estorno como receita.
+     */
+    private function extractCsvAmountWithSign(array $normalized): ?float
+    {
+        $amountKeys = ['valor', 'value', 'amount', 'total', 'valor em r$'];
+
+        foreach ($amountKeys as $key) {
+            if (isset($normalized[$key]) && !empty($normalized[$key])) {
+                $amount = $this->parseSignedCsvAmount($normalized[$key]);
                 if ($amount !== null) {
                     return $amount;
                 }
@@ -1355,6 +1427,36 @@ public function parsePdf(string $filePath): array
         // Se era negativo, mantém negativo; senão retorna positivo
         // No Nubank, despesas são negativas, mas vamos converter para positivo já que são sempre despesas
         return abs((float)$amount);
+    }
+
+    /**
+     * Converte string de valor do CSV para float preservando sinal.
+     */
+    private function parseSignedCsvAmount(string $amountString): ?float
+    {
+        if (empty($amountString)) {
+            return null;
+        }
+
+        $amountString = preg_replace('/R4/i', 'R$', $amountString);
+        $amountString = preg_replace('/[R$\s]/', '', $amountString);
+
+        $isNegative = (strpos($amountString, '-') !== false);
+        $amountString = str_replace('-', '', $amountString);
+
+        if (strpos($amountString, ',') !== false) {
+            $amountString = str_replace('.', '', $amountString);
+            $amountString = str_replace(',', '.', $amountString);
+        }
+
+        $amount = filter_var($amountString, FILTER_VALIDATE_FLOAT);
+        if ($amount === false) {
+            Log::warning("Não foi possível parsear valor CSV com sinal: {$amountString}");
+            return null;
+        }
+
+        $amount = (float)$amount;
+        return $isNegative ? -$amount : $amount;
     }
 
     /**

@@ -30,8 +30,11 @@ export const transactionService = {
     return data
   },
 
-  async deleteAll() {
-    const { data } = await api.delete('/transactions/delete-all')
+  async deleteAll(filters = {}) {
+    const { data } = await api.delete('/transactions/delete-all', {
+      params: filters,
+      data: filters,
+    })
     return data
   },
 }

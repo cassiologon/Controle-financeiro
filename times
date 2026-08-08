@@ -1,0 +1,48 @@
+// lista-squads.js
+const https = require("https");
+
+function get(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, res => {
+      let data = "";
+      res.on("data", c => data += c);
+      res.on("end", () => resolve(data));
+    }).on("error", reject);
+  });
+}
+
+(async () => {
+  const html = await get("https://7a0.com.br/play");
+
+  const js = [...html.matchAll(/src="([^"]+\.js)"/g)]
+    .map(m => m[1].startsWith("http") ? m[1] : "https://7a0.com.br" + m[1]);
+
+  console.log("Arquivos JS encontrados:", js.length);
+
+  const slugs = new Set();
+
+  for (const file of js) {
+    const code = await get(file);
+
+    // índice principal: módulo 1531 com sel/copa/slug
+    const indexMatch = code.match(/1531:e=>\{e\.exports=JSON\.parse\('(\[.*?\])'\)/);
+    if (indexMatch) {
+      const lista = JSON.parse(indexMatch[1].replace(/\\"/g, '"'));
+      for (const item of lista) {
+        slugs.add(item.slug);
+      }
+      continue;
+    }
+
+    // fallback: slugs soltos no código
+    for (const m of code.matchAll(/[A-Z]{3}-\d{4}-[a-f0-9]{8}/g)) {
+      slugs.add(m[0]);
+    }
+  }
+
+  const ordenado = [...slugs].sort();
+  console.log(`\nTotal de seleções: ${ordenado.length}\n`);
+  for (const slug of ordenado) {
+    console.log(`${slug}.json`);
+  }
+})();

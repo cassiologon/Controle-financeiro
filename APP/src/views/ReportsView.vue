@@ -63,8 +63,27 @@
         </Card>
       </div>
 
+      <AiInsightsCard
+        :insights="insights"
+        :loading="insightsLoading"
+        :error="insightsError"
+        @generate="generateInsights"
+      />
+
       <!-- Gastos diários (bar chart) -->
-      <Card title="Gastos diários" class="mb-6">
+      <Card class="mb-6">
+        <template #header>
+          <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <h3 class="text-lg font-semibold text-gray-900">Gastos diários</h3>
+            <div class="text-left sm:text-right">
+              <p class="text-xs text-gray-500">Média diária</p>
+              <p class="text-xl font-bold text-red-600">
+                R$ {{ formatCurrency(averageDailyExpense) }}
+              </p>
+              <p class="text-xs text-gray-400">base: {{ periodDaysCount }} dias do período</p>
+            </div>
+          </div>
+        </template>
         <div v-if="!dailyExpensesChartData.labels?.length" class="h-64 flex items-center justify-center text-gray-500">
           Nenhum gasto no período selecionado
         </div>
@@ -280,12 +299,14 @@ import { Bar } from 'vue-chartjs'
 import { dashboardService } from '@/services/dashboardService'
 import { transactionService } from '@/services/transactionService'
 import { recurringTransactionService } from '@/services/recurringTransactionService'
+import { insightsService } from '@/services/insightsService'
 import Card from '@/components/Card.vue'
 import Button from '@/components/Button.vue'
 import Input from '@/components/Input.vue'
 import CategoryBadge from '@/components/CategoryBadge.vue'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import Modal from '@/components/Modal.vue'
+import AiInsightsCard from '@/components/AiInsightsCard.vue'
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend)
 
@@ -297,6 +318,9 @@ const categoryRecurringMap = ref({})
 const allRecurringBills = ref([])
 const loadingTransactions = ref({})
 const typeFilter = ref('all')
+const insights = ref(null)
+const insightsLoading = ref(false)
+const insightsError = ref(null)
 
 const typeFilterOptions = [
   { value: 'all', label: 'Todas' },
@@ -415,6 +439,26 @@ const getEndDate = () => {
 const startDate = ref(getStartDate())
 const endDate = ref(getEndDate())
 
+const periodDaysCount = computed(() => {
+  if (!startDate.value || !endDate.value) return 0
+  const start = new Date(`${startDate.value}T00:00:00`)
+  const end = new Date(`${endDate.value}T00:00:00`)
+  const diffMs = end.getTime() - start.getTime()
+
+  if (Number.isNaN(diffMs) || diffMs < 0) return 0
+
+  const dayMs = 24 * 60 * 60 * 1000
+  return Math.floor(diffMs / dayMs) + 1
+})
+
+const averageDailyExpense = computed(() => {
+  const days = periodDaysCount.value
+  if (!days) return 0
+  const daily = reportData.value?.daily_expenses || []
+  const totalDailyExpense = daily.reduce((sum, item) => sum + (parseFloat(item.total) || 0), 0)
+  return totalDailyExpense / days
+})
+
 const showDayModal = ref(false)
 const selectedDayDate = ref(null)
 const dayExpenses = ref([])
@@ -429,6 +473,8 @@ async function loadReports() {
   expandedCategories.value = {}
   categoryTransactionsMap.value = {}
   categoryRecurringMap.value = {}
+  insights.value = null
+  insightsError.value = null
   try {
     const [dashboard, recurring] = await Promise.all([
       dashboardService.getDashboard(startDate.value, endDate.value),
@@ -436,10 +482,41 @@ async function loadReports() {
     ])
     reportData.value = dashboard
     allRecurringBills.value = recurring
+    await loadStoredInsights()
   } catch (error) {
     console.error('Error loading reports:', error)
   } finally {
     loading.value = false
+  }
+}
+
+async function loadStoredInsights() {
+  if (!startDate.value || !endDate.value) return
+
+  try {
+    const data = await insightsService.get(startDate.value, endDate.value)
+    if (data?.insights?.length) {
+      insights.value = data
+    }
+  } catch (error) {
+    console.error('Error loading stored insights:', error)
+  }
+}
+
+async function generateInsights(force = false) {
+  if (!startDate.value || !endDate.value) return
+
+  insightsLoading.value = true
+  insightsError.value = null
+
+  try {
+    insights.value = await insightsService.generate(startDate.value, endDate.value, force)
+  } catch (error) {
+    insights.value = null
+    insightsError.value = error.response?.data?.message || 'Não foi possível gerar os insights. Tente novamente.'
+    console.error('Error generating insights:', error)
+  } finally {
+    insightsLoading.value = false
   }
 }
 
@@ -461,6 +538,7 @@ async function loadDayExpenses(dateStr) {
       start_date: dateStr,
       end_date: dateStr,
       type: 'expense',
+      is_installment: false,
       per_page: 500,
     })
     dayExpenses.value = res.data || []

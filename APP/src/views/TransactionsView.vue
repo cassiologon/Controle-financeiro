@@ -268,7 +268,7 @@
     <ConfirmModal
       :show="showDeleteAllModal"
       title="Confirmar exclusão de todas as transações"
-      message="Tem certeza que deseja deletar TODAS as transações? Esta ação não pode ser desfeita."
+      message="Tem certeza que deseja deletar as transações do filtro ativo? Esta ação não pode ser desfeita."
       @confirm="handleDeleteAll"
       @cancel="showDeleteAllModal = false"
     />
@@ -322,6 +322,36 @@
               required
               :error="errors.date"
             />
+            <div v-if="!editingTransaction" class="space-y-3 p-3 rounded-xl bg-gray-50 border border-gray-200">
+              <label class="flex items-center gap-2 text-sm font-medium text-gray-700">
+                <input
+                  v-model="form.is_installment"
+                  type="checkbox"
+                  class="w-4 h-4 text-primary-600 border-gray-300 rounded"
+                />
+                Transação parcelada
+              </label>
+              <div v-if="form.is_installment" class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <Input
+                  v-model="form.current_installment"
+                  type="number"
+                  min="1"
+                  step="1"
+                  label="Parcela atual"
+                  required
+                  :error="errors.current_installment"
+                />
+                <Input
+                  v-model="form.total_installments"
+                  type="number"
+                  min="1"
+                  step="1"
+                  label="Total de parcelas"
+                  required
+                  :error="errors.total_installments"
+                />
+              </div>
+            </div>
             <Select
               v-model="form.bank_name"
               :options="bankFormOptions"
@@ -505,11 +535,22 @@ const form = ref({
   type: 'expense',
   amount: 0,
   description: '',
-  date: new Date().toISOString().split('T')[0],
+  date: getLocalTodayDate(),
   bank_name: '',
+  is_installment: false,
+  current_installment: 1,
+  total_installments: 2,
 })
 
 const errors = ref({})
+
+function getLocalTodayDate() {
+  const now = new Date()
+  const year = now.getFullYear()
+  const month = String(now.getMonth() + 1).padStart(2, '0')
+  const day = String(now.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
 
 const categoryOptions = computed(() => {
   const options = [{ value: '', label: 'Todas as categorias' }]
@@ -715,6 +756,9 @@ function editTransaction(transaction) {
     description: transaction.description,
     date: formattedDate,
     bank_name: transaction.bank_name || '',
+    is_installment: false,
+    current_installment: 1,
+    total_installments: 2,
   }
   // Se o banco não está nas opções padrão, define como "Outro" e preenche o campo customizado
   if (transaction.bank_name && !bankFormOptions.value.find(opt => opt.value === transaction.bank_name)) {
@@ -734,8 +778,11 @@ function closeModal() {
     type: 'expense',
     amount: 0,
     description: '',
-    date: new Date().toISOString().split('T')[0],
+    date: getLocalTodayDate(),
     bank_name: '',
+    is_installment: false,
+    current_installment: 1,
+    total_installments: 2,
   }
   customBankNameForm.value = ''
   errors.value = {}
@@ -748,6 +795,41 @@ async function saveTransaction() {
   try {
     // Se "Outro" foi selecionado, usa o nome customizado
     const transactionData = { ...form.value }
+
+    if (!editingTransaction.value && transactionData.is_installment) {
+      transactionData.current_installment = Number(transactionData.current_installment)
+      transactionData.total_installments = Number(transactionData.total_installments)
+
+      if (!transactionData.current_installment || transactionData.current_installment < 1) {
+        errors.value.current_installment = 'Informe uma parcela atual válida'
+        saving.value = false
+        return
+      }
+
+      if (!transactionData.total_installments || transactionData.total_installments < 1) {
+        errors.value.total_installments = 'Informe um total de parcelas válido'
+        saving.value = false
+        return
+      }
+
+      if (transactionData.current_installment > transactionData.total_installments) {
+        errors.value.current_installment = 'A parcela atual deve ser menor ou igual ao total'
+        saving.value = false
+        return
+      }
+    }
+
+    if (!editingTransaction.value && !transactionData.is_installment) {
+      delete transactionData.current_installment
+      delete transactionData.total_installments
+    }
+
+    if (editingTransaction.value) {
+      delete transactionData.is_installment
+      delete transactionData.current_installment
+      delete transactionData.total_installments
+    }
+
     if (transactionData.bank_name === 'Outro' && customBankNameForm.value) {
       transactionData.bank_name = customBankNameForm.value
     } else if (transactionData.bank_name === 'Outro' && !customBankNameForm.value) {
@@ -930,38 +1012,23 @@ async function handleDeleteAll() {
   showDeleteAllModal.value = false
 
   try {
-    const response = await transactionService.deleteAll()
-    
-    // Limpa todas as transações
-    transactions.value = {
-      data: [],
-      current_page: 1,
-      last_page: 1,
-      per_page: 15,
-      total: 0,
-      totals: {
-        total_income: 0,
-        total_expense: 0,
-        income_count: 0,
-        expense_count: 0,
-      },
-    }
-    
-    // Limpa pendentes também
-    pendingTransactions.value = {
-      data: [],
-      current_page: 1,
-      last_page: 1,
-      per_page: 100,
-      total: 0,
-    }
-    
-    // Recarrega bancos (vai ficar vazio)
+    const deleteFilters = {}
+    if (filters.value.type) deleteFilters.type = filters.value.type
+    if (filters.value.category_id) deleteFilters.category_id = filters.value.category_id
+    if (filters.value.bank_name) deleteFilters.bank_name = filters.value.bank_name
+    if (filters.value.start_date) deleteFilters.start_date = filters.value.start_date
+    if (filters.value.end_date) deleteFilters.end_date = filters.value.end_date
+    if (filters.value.search) deleteFilters.search = filters.value.search
+
+    const response = await transactionService.deleteAll(deleteFilters)
+
+    await loadTransactions(1)
+    await loadPendingTransactions()
     await loadBanks()
-    
-    success(`Todas as transações foram deletadas com sucesso! (${response.deleted_count || 0} transações)`)
+
+    success(`Transações do filtro ativo foram deletadas com sucesso! (${response.deleted_count || 0} transações)`)
   } catch (error) {
-    showError('Erro ao deletar todas as transações. Tente novamente.')
+    showError('Erro ao deletar transações do filtro ativo. Tente novamente.')
     console.error('Error deleting all transactions:', error)
   }
 }

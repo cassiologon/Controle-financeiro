@@ -98,6 +98,7 @@ class DashboardController extends Controller
 
         $dailyExpenses = $transactions
             ->filter(fn ($transaction) => $effectiveType($transaction) === 'expense')
+            ->filter(fn ($transaction) => !$transaction->is_installment)
             ->groupBy(function ($transaction) {
                 $date = $transaction->date;
                 return $date instanceof \DateTimeInterface ? $date->format('Y-m-d') : (string) $date;

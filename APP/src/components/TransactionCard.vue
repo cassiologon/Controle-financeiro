@@ -91,6 +91,12 @@
             >
               {{ transaction.category?.name || 'Sem categoria' }}
             </span>
+            <span
+              v-if="transaction.is_installment"
+              class="inline-flex items-center px-2 py-0.5 rounded-lg text-xs font-semibold bg-primary-100 text-primary-700"
+            >
+              Parcelada
+            </span>
           </div>
           <p class="text-xs text-gray-400 font-medium">
             {{ formatDate(transaction.date) }}
@@ -168,7 +174,20 @@ function formatCurrency(value) {
 }
 
 function formatDate(date) {
-  const d = new Date(date)
+  if (!date) return ''
+
+  // Evita deslocamento de fuso ao converter datas que chegam como
+  // "YYYY-MM-DD" ou "YYYY-MM-DDTHH:mm:ss...".
+  let d
+  if (typeof date === 'string' && /^\d{4}-\d{2}-\d{2}/.test(date)) {
+    const [year, month, day] = date.slice(0, 10).split('-').map(Number)
+    d = new Date(year, month - 1, day)
+  } else {
+    d = new Date(date)
+  }
+
+  if (Number.isNaN(d.getTime())) return ''
+
   const today = new Date()
   const yesterday = new Date(today)
   yesterday.setDate(yesterday.getDate() - 1)
