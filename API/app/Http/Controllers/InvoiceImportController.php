@@ -8,7 +8,6 @@ use App\Services\KeywordExtractorService;
 use App\Services\CategoryMatcherService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
 
 class InvoiceImportController extends Controller
@@ -18,52 +17,89 @@ class InvoiceImportController extends Controller
      */
     public function upload(Request $request): JsonResponse
     {
+        // Aceita "files[]" (multiplos) mantendo "file" (unico) para compatibilidade.
+        if ($request->hasFile('file') && !$request->hasFile('files')) {
+            $request->files->set('files', [$request->file('file')]);
+        }
+
         $validated = $request->validate([
-            'file' => 'required|file|mimes:pdf,csv|max:10240', // 10MB max
+            'files' => 'required|array|min:1|max:20',
+            // OFX nao tem mime type confiavel: valida pela extensao.
+            'files.*' => 'required|file|extensions:pdf,csv,ofx|max:10240', // 10MB por arquivo
             'bank_name' => 'required|string|max:255',
         ]);
 
-        try {
-            $user = $request->user();
-            $file = $request->file('file');
+        $user = $request->user();
+        $files = $request->file('files');
 
-            // Cria diretório para o usuário se não existir
-            $userDir = "invoice-imports/{$user->id}";
+        // Cria o diretorio manualmente em storage/app/ (nao storage/app/private)
+        $userDir = "invoice-imports/{$user->id}";
+        $fullDir = storage_path('app/' . $userDir);
+        if (!is_dir($fullDir)) {
+            mkdir($fullDir, 0755, true);
+        }
 
-            // Cria o diretório manualmente em storage/app/ (não storage/app/private)
-            $fullDir = storage_path('app/' . $userDir);
-            if (!is_dir($fullDir)) {
-                mkdir($fullDir, 0755, true);
+        $imported = [];
+        $failed = [];
+
+        // Processa em ordem para que a reconciliacao de parcelas entre faturas
+        // consecutivas encontre os lancamentos ja gravados.
+        foreach ($files as $index => $file) {
+            $originalName = $file->getClientOriginalName();
+
+            try {
+                $filename = time() . '-' . $index . '-' . $originalName;
+                $filePath = $userDir . '/' . $filename;
+                $file->move($fullDir, $filename);
+
+                // Em ambiente local, processa imediatamente (sem precisar do queue worker)
+                if (app()->environment('local')) {
+                    ProcessInvoiceImport::dispatchSync($filePath, $user->id, $validated['bank_name']);
+                } else {
+                    ProcessInvoiceImport::dispatch($filePath, $user->id, $validated['bank_name']);
+                }
+
+                $imported[] = $originalName;
+
+                Log::info("Arquivo enviado para processamento", [
+                    'user_id' => $user->id,
+                    'file_path' => $filePath,
+                    'bank_name' => $validated['bank_name'],
+                ]);
+            } catch (\Exception $e) {
+                // Um arquivo com problema nao pode abortar os demais.
+                $failed[] = ['file' => $originalName, 'error' => $e->getMessage()];
+
+                Log::error("Erro ao processar arquivo de fatura: " . $e->getMessage(), [
+                    'user_id' => $user->id,
+                    'file' => $originalName,
+                ]);
             }
+        }
 
-            // Salva arquivo temporário diretamente em storage/app/
-            $filename = time() . '-' . $file->getClientOriginalName();
-            $filePath = $userDir . '/' . $filename;
-            $file->move($fullDir, $filename);
-
-            // Em ambiente local, processa imediatamente (sem precisar do queue worker)
-            if (app()->environment('local')) {
-                ProcessInvoiceImport::dispatchSync($filePath, $user->id, $validated['bank_name']);
-            } else {
-                ProcessInvoiceImport::dispatch($filePath, $user->id, $validated['bank_name']);
-            }
-
-            Log::info("Arquivo enviado para processamento", [
-                'user_id' => $user->id,
-                'file_path' => $filePath,
-                'bank_name' => $validated['bank_name'],
-            ]);
-
+        if (empty($imported)) {
             return response()->json([
-                'message' => 'Arquivo enviado para processamento',
-                'status' => 'processing',
-            ], 202);
-        } catch (\Exception $e) {
-            Log::error("Erro ao fazer upload de arquivo: " . $e->getMessage());
-            return response()->json([
-                'message' => 'Erro ao processar arquivo: ' . $e->getMessage(),
+                'message' => 'Nenhum arquivo pode ser processado.',
+                'imported' => [],
+                'failed' => $failed,
             ], 500);
         }
+
+        $total = count($imported);
+        $message = $total === 1
+            ? 'Arquivo enviado para processamento'
+            : "{$total} arquivos enviados para processamento";
+
+        if (!empty($failed)) {
+            $message .= '. ' . count($failed) . ' falhou(ram).';
+        }
+
+        return response()->json([
+            'message' => $message,
+            'status' => 'processing',
+            'imported' => $imported,
+            'failed' => $failed,
+        ], 202);
     }
 
     /**

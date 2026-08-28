@@ -2,112 +2,69 @@
 
 namespace App\Services;
 
-use Illuminate\Support\Facades\Http;
+use App\Ai\Agents\FinancialInsights;
+use Laravel\Ai\Exceptions\AiException;
+use Laravel\Ai\Responses\StructuredAgentResponse;
 use RuntimeException;
+use Throwable;
 
 class FinancialInsightsService
 {
+    public function __construct(private FinancialInsights $agent)
+    {
+    }
+
     public function generate(array $context): array
     {
-        $apiKey = config('services.openai.key');
-        $model = config('services.openai.model', 'gpt-4o-mini');
-
-        if (empty($apiKey)) {
-            throw new RuntimeException('Chave da OpenAI não configurada.');
-        }
+        $provider = config('ai.insights.provider');
+        $model = config('ai.insights.model');
+        $timeout = (int) config('ai.insights.timeout');
 
         info('Gerando insights financeiros com IA', [
+            'provider' => $provider,
+            'model' => $model,
             'period' => $context['period'] ?? null,
             'categories_count' => count($context['expenses_by_category'] ?? []),
         ]);
 
-        $response = Http::withToken($apiKey)
-            ->timeout(90)
-            ->post('https://api.openai.com/v1/chat/completions', [
+        try {
+            $response = $this->agent->prompt(
+                $this->buildUserPrompt($context),
+                provider: $provider,
+                model: $model,
+                timeout: $timeout,
+            );
+        } catch (AiException $e) {
+            info('Erro do provedor de IA ao gerar insights', [
+                'provider' => $provider,
                 'model' => $model,
-                'temperature' => 0.35,
-                'response_format' => ['type' => 'json_object'],
-                'messages' => [
-                    [
-                        'role' => 'system',
-                        'content' => $this->systemPrompt(),
-                    ],
-                    [
-                        'role' => 'user',
-                        'content' => $this->buildUserPrompt($context),
-                    ],
-                ],
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
             ]);
 
-        if (!$response->successful()) {
-            info('Erro na API OpenAI ao gerar insights', [
-                'status' => $response->status(),
-                'body' => $response->body(),
+            throw new RuntimeException('Não foi possível gerar insights no momento. Tente novamente.');
+        } catch (Throwable $e) {
+            info('Falha inesperada ao gerar insights', [
+                'provider' => $provider,
+                'model' => $model,
+                'exception' => $e::class,
+                'message' => $e->getMessage(),
             ]);
 
             throw new RuntimeException('Não foi possível gerar insights no momento. Tente novamente.');
         }
 
-        $content = data_get($response->json(), 'choices.0.message.content');
-
-        if (!is_string($content) || trim($content) === '') {
-            throw new RuntimeException('Resposta inválida da OpenAI.');
+        if (! $response instanceof StructuredAgentResponse) {
+            throw new RuntimeException('Resposta inválida do provedor de IA.');
         }
 
-        $parsed = json_decode($content, true);
+        info('Insights financeiros gerados', [
+            'prompt_tokens' => $response->usage->promptTokens,
+            'completion_tokens' => $response->usage->completionTokens,
+            'reasoning_tokens' => $response->usage->reasoningTokens,
+        ]);
 
-        if (!is_array($parsed)) {
-            throw new RuntimeException('Não foi possível interpretar a resposta da IA.');
-        }
-
-        return $this->normalizeResponse($parsed);
-    }
-
-    private function systemPrompt(): string
-    {
-        return <<<'PROMPT'
-Você é um consultor financeiro pessoal experiente no Brasil. Sua análise deve ser ESPECÍFICA, usando nomes reais, valores exatos e percentuais dos dados fornecidos.
-
-PROIBIDO — nunca faça isso:
-- Conselhos genéricos: "cancelar assinaturas", "rever gastos com carro", "economizar mais"
-- Mencionar categorias ou serviços que não aparecem nos dados
-- Inventar valores, percentuais ou tendências
-
-OBRIGATÓRIO — sempre faça isso:
-- Cite valores em R$ e percentuais reais dos dados (ex: "Starlink (R$ 465) representa 48% das assinaturas")
-- Detalhe categorias com breakdown por item quando disponível em "Detalhamento por categoria"
-- Compare com o período anterior quando houver dados em "Comparação com período anterior" (ex: "combustível aumentou 35%")
-- Diferencie gastos provavelmente essenciais (internet, contabilidade, seguro) dos discricionários (streaming, delivery)
-- Quando a economia for limitada em uma categoria, diga explicitamente e foque nos itens menores
-- Orçamentos estourados: cite categoria, valor orçado vs gasto e quanto passou
-- Dias de pico: cite data e valor se relevante
-- Seja direto, empático e prático — como quem já abriu a fatura do cliente
-
-Formato de insight ideal (description):
-- Abra com o fato concreto (valor total + composição)
-- Explique o que mais pesa e por quê
-- Conclua com ação específica e realista (não genérica)
-- estimated_savings só quando houver base nos dados; use 0 se economia for limitada
-
-Gere entre 3 e 6 insights, do maior impacto ao menor.
-- impact: exatamente "high", "medium" ou "low"
-- estimated_savings: número realista em reais; 0 se não houver margem clara
-
-Responda APENAS com JSON válido:
-{
-  "summary": "Resumo com números concretos do período (receitas, despesas, saldo, principal destaque)",
-  "total_potential_savings": 0,
-  "insights": [
-    {
-      "title": "Título específico (ex: Assinaturas — Starlink e Contabilizei concentram 80%)",
-      "description": "Texto detalhado com valores, percentuais e recomendação prática",
-      "category": "Nome da categoria ou Geral",
-      "impact": "high",
-      "estimated_savings": 0
-    }
-  ]
-}
-PROMPT;
+        return $this->normalizeResponse($response->toArray());
     }
 
     private function buildUserPrompt(array $context): string
@@ -296,35 +253,31 @@ PROMPT;
         return implode("\n", $lines);
     }
 
+    /**
+     * O schema de saída estruturada já garante tipos, o enum de impacto e a
+     * presença dos campos, então aqui resta apenas arredondar e derivar totais.
+     */
     private function normalizeResponse(array $parsed): array
     {
         $insights = collect($parsed['insights'] ?? [])
-            ->filter(fn ($item) => is_array($item))
-            ->map(function ($item) {
-                $impact = strtolower((string) ($item['impact'] ?? 'medium'));
-                if (!in_array($impact, ['high', 'medium', 'low'], true)) {
-                    $impact = 'medium';
-                }
-
-                return [
-                    'title' => trim((string) ($item['title'] ?? 'Insight')),
-                    'description' => trim((string) ($item['description'] ?? '')),
-                    'category' => trim((string) ($item['category'] ?? 'Geral')),
-                    'impact' => $impact,
-                    'estimated_savings' => max(0, (float) ($item['estimated_savings'] ?? 0)),
-                ];
-            })
-            ->filter(fn ($item) => $item['title'] !== '' && $item['description'] !== '')
+            ->map(fn (array $item) => [
+                'title' => trim($item['title']),
+                'description' => trim($item['description']),
+                'category' => trim($item['category']),
+                'impact' => $item['impact'],
+                'estimated_savings' => round(max(0, (float) $item['estimated_savings']), 2),
+            ])
+            ->filter(fn (array $item) => $item['title'] !== '' && $item['description'] !== '')
             ->values()
             ->all();
 
         $totalPotentialSavings = (float) ($parsed['total_potential_savings'] ?? 0);
-        if ($totalPotentialSavings <= 0 && !empty($insights)) {
+        if ($totalPotentialSavings <= 0 && ! empty($insights)) {
             $totalPotentialSavings = array_sum(array_column($insights, 'estimated_savings'));
         }
 
         return [
-            'summary' => trim((string) ($parsed['summary'] ?? 'Análise concluída com sucesso.')),
+            'summary' => trim($parsed['summary'] ?? ''),
             'total_potential_savings' => round($totalPotentialSavings, 2),
             'insights' => $insights,
             'generated_at' => now()->toIso8601String(),

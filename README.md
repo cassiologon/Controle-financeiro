@@ -47,13 +47,21 @@ Sistema completo de controle financeiro desenvolvido com Vue.js 3 (front-end) e 
 
 **Opção A – Um comando (após a primeira configuração):**
 
-Na raiz do projeto, execute:
+Na raiz do projeto, execute o script correspondente ao seu sistema:
 
 ```bash
+# Linux / macOS
 ./start-dev.sh
 ```
 
+```powershell
+# Windows
+.\start-dev.ps1
+```
+
 Isso sobe a API (porta 8000), o worker de filas e o APP (porta 3000). Na primeira vez, configure antes a API e o APP conforme a Opção B.
+
+> **Windows:** use o `start-dev.ps1`, não o `start-dev.sh`. O script `.sh` depende de gerenciamento de processos POSIX (`pkill -P`, `kill -0`) que não funciona no Git Bash: ao encerrar, ele mata o processo do `npm` mas deixa o `vite` vivo segurando a porta 3000, e anuncia que parou tudo. O `start-dev.ps1` coleta a árvore de processos completa antes de encerrar e derruba todos os descendentes.
 
 **Opção B – Passo a passo manual:**
 
@@ -237,6 +245,30 @@ Para que o sistema categorize automaticamente as transações, adicione palavras
 2. Adicione palavras-chave relacionadas (ex: para "Alimentação", adicione: "burguer", "restaurante", "comida", "lanche")
 3. Ao importar faturas, transações com essas palavras na descrição serão automaticamente categorizadas
 
+**Categorização com IA:**
+
+Na seção "Transações Pendentes" há o botão **✨ Sugerir com IA**, que analisa as descrições
+das transações e sugere uma categoria para cada uma, entre as categorias que você já criou.
+
+- As transações que já casam com alguma palavra-chave são resolvidas localmente, sem custo de IA.
+- Cada sugestão vem com o nível de confiança e uma justificativa curta.
+- Sugestões acima da confiança mínima (`AI_CATEGORIZATION_MIN_CONFIDENCE`, padrão 70%) podem ser
+  aplicadas de uma vez; as demais ficam pré-selecionadas para você revisar antes de confirmar.
+- Ao aplicar, as palavras-chave extraídas são guardadas na categoria, então transações parecidas
+  passam a ser categorizadas sem chamar a IA novamente.
+- A análise roda em lotes de `AI_CATEGORIZATION_BATCH_SIZE` transações (padrão 40).
+
+Configuração em `API/.env`:
+
+```env
+AI_CATEGORIZATION_PROVIDER=openai
+AI_CATEGORIZATION_MODEL=gpt-5.6-luna
+AI_CATEGORIZATION_REASONING_EFFORT=low
+AI_CATEGORIZATION_TIMEOUT=120
+AI_CATEGORIZATION_BATCH_SIZE=40
+AI_CATEGORIZATION_MIN_CONFIDENCE=0.7
+```
+
 ## Estrutura de Pastas
 
 ### API (Laravel)
@@ -285,6 +317,8 @@ APP/
 - `GET /api/transactions/{id}` - Obter transação
 - `PUT /api/transactions/{id}` - Atualizar transação
 - `DELETE /api/transactions/{id}` - Excluir transação
+- `POST /api/transactions/ai-suggestions` - Sugerir categorias com IA para transações pendentes
+- `POST /api/transactions/ai-suggestions/apply` - Aplicar as sugestões confirmadas
 
 ### Dashboard
 - `GET /api/dashboard` - Obter dados do dashboard

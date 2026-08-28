@@ -47,6 +47,49 @@
 
       <!-- Category Selection -->
       <div class="mt-4 pt-4 border-t border-gray-100">
+        <!-- Sugestão automática -->
+        <div
+          v-if="suggestion && suggestion.category"
+          class="mb-3 flex items-start gap-3 rounded-xl px-3 py-2.5"
+          :class="suggestionApplied ? 'bg-primary-50 border border-primary-200' : 'bg-gray-50 border border-gray-200'"
+        >
+          <span class="text-lg leading-none mt-0.5">{{ suggestion.source === 'ai' ? '✨' : '🔖' }}</span>
+          <div class="flex-1 min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-xs font-semibold text-gray-700">
+                {{ suggestion.source === 'ai' ? 'Sugestão da IA' : 'Palavra-chave conhecida' }}
+              </span>
+              <span
+                class="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-semibold"
+                :style="{
+                  backgroundColor: `${suggestion.category.color || '#6366f1'}1a`,
+                  color: suggestion.category.color || '#6366f1',
+                }"
+              >
+                {{ suggestion.category.icon || '📁' }} {{ suggestion.category.name }}
+              </span>
+              <span
+                class="px-2 py-0.5 rounded-lg text-xs font-semibold"
+                :class="confidenceClass"
+              >
+                {{ confidenceLabel }}
+              </span>
+            </div>
+            <p v-if="suggestion.reason" class="text-xs text-gray-500 mt-1">
+              {{ suggestion.reason }}
+            </p>
+          </div>
+          <button
+            v-if="!suggestionApplied"
+            type="button"
+            @click="applySuggestion"
+            class="flex-shrink-0 text-xs font-semibold text-primary-600 hover:text-primary-800 transition-colors"
+          >
+            Usar
+          </button>
+          <span v-else class="flex-shrink-0 text-xs font-semibold text-primary-600">Aplicada</span>
+        </div>
+
         <div class="flex items-center gap-3 mb-3">
           <CategorySelect
             v-model="selectedCategoryId"
@@ -144,6 +187,10 @@ const props = defineProps({
   categories: {
     type: Array,
     default: () => []
+  },
+  suggestion: {
+    type: Object,
+    default: null
   }
 })
 
@@ -156,12 +203,48 @@ const loadingKeywords = ref(false)
 const categorizing = ref(false)
 const error = ref(null)
 
+const suggestionApplied = computed(() =>
+  !!props.suggestion?.category_id && Number(selectedCategoryId.value) === Number(props.suggestion.category_id)
+)
+
+const confidenceLabel = computed(() => {
+  const confidence = Number(props.suggestion?.confidence ?? 0)
+  return `${Math.round(confidence * 100)}% de confiança`
+})
+
+const confidenceClass = computed(() => {
+  const confidence = Number(props.suggestion?.confidence ?? 0)
+  if (confidence >= 0.9) return 'bg-success-100 text-success-700'
+  if (confidence >= 0.7) return 'bg-primary-100 text-primary-700'
+  return 'bg-warning-100 text-warning-600'
+})
+
+function applySuggestion() {
+  if (props.suggestion?.category_id) {
+    selectedCategoryId.value = props.suggestion.category_id
+  }
+}
+
+// Pré-seleciona a sugestão assim que ela chega, sem sobrescrever uma escolha manual
+watch(() => props.suggestion, (suggestion) => {
+  if (suggestion?.category_id && !selectedCategoryId.value) {
+    selectedCategoryId.value = suggestion.category_id
+  }
+}, { immediate: true })
+
 // Carrega preview das keywords quando seleciona categoria
 watch([() => props.transaction.description, selectedCategoryId], async ([description, categoryId]) => {
   if (!categoryId || !description?.trim()) {
     keywordsToAdd.value = []
     return
   }
+
+  // A sugestão já traz as keywords que a IA extraiu para esta categoria
+  if (suggestionApplied.value && props.suggestion?.keywords?.length > 0) {
+    keywordsToAdd.value = [...props.suggestion.keywords]
+    return
+  }
+
   loadingKeywords.value = true
   try {
     const { keywords } = await invoiceImportService.previewKeywords(description)

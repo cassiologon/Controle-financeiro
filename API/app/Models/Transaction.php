@@ -20,6 +20,8 @@ class Transaction extends Model
         'date',
         'status',
         'bank_name',
+        'external_id',
+        'external_ref',
         'is_installment',
     ];
 
