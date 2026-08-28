@@ -49,7 +49,7 @@
       <div class="mt-4 pt-4 border-t border-gray-100">
         <!-- Sugestão automática -->
         <div
-          v-if="suggestion && suggestion.category"
+          v-if="suggestedCategory"
           class="mb-3 flex items-start gap-3 rounded-xl px-3 py-2.5"
           :class="suggestionApplied ? 'bg-primary-50 border border-primary-200' : 'bg-gray-50 border border-gray-200'"
         >
@@ -62,11 +62,17 @@
               <span
                 class="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-xs font-semibold"
                 :style="{
-                  backgroundColor: `${suggestion.category.color || '#6366f1'}1a`,
-                  color: suggestion.category.color || '#6366f1',
+                  backgroundColor: `${suggestedCategory.color || '#6366f1'}1a`,
+                  color: suggestedCategory.color || '#6366f1',
                 }"
               >
-                {{ suggestion.category.icon || '📁' }} {{ suggestion.category.name }}
+                {{ suggestedCategory.icon || '📁' }} {{ suggestedCategory.name }}
+              </span>
+              <span
+                v-if="suggestedCategory.isNew"
+                class="px-2 py-0.5 rounded-lg text-xs font-semibold bg-primary-100 text-primary-700"
+              >
+                Categoria nova
               </span>
               <span
                 class="px-2 py-0.5 rounded-lg text-xs font-semibold"
@@ -83,9 +89,10 @@
             v-if="!suggestionApplied"
             type="button"
             @click="applySuggestion"
-            class="flex-shrink-0 text-xs font-semibold text-primary-600 hover:text-primary-800 transition-colors"
+            :disabled="creatingCategory"
+            class="flex-shrink-0 text-xs font-semibold text-primary-600 hover:text-primary-800 transition-colors disabled:opacity-50"
           >
-            Usar
+            {{ creatingCategory ? 'Criando...' : (suggestedCategory.isNew ? 'Criar e usar' : 'Usar') }}
           </button>
           <span v-else class="flex-shrink-0 text-xs font-semibold text-primary-600">Aplicada</span>
         </div>
@@ -175,6 +182,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { invoiceImportService } from '@/services/invoiceImportService'
+import { categoryService } from '@/services/categoryService'
 import CategorySelect from '@/components/CategorySelect.vue'
 import Button from '@/components/Button.vue'
 
@@ -201,11 +209,26 @@ const keywordsToAdd = ref([])
 const newKeywordInput = ref('')
 const loadingKeywords = ref(false)
 const categorizing = ref(false)
+const creatingCategory = ref(false)
+const createdCategoryId = ref(null)
 const error = ref(null)
 
-const suggestionApplied = computed(() =>
-  !!props.suggestion?.category_id && Number(selectedCategoryId.value) === Number(props.suggestion.category_id)
-)
+// A IA pode apontar uma categoria existente ou propor uma nova, que só é
+// criada quando o usuário aceita a sugestão.
+const suggestedCategory = computed(() => {
+  if (props.suggestion?.category) {
+    return { ...props.suggestion.category, isNew: false }
+  }
+  if (props.suggestion?.new_category) {
+    return { ...props.suggestion.new_category, isNew: true }
+  }
+  return null
+})
+
+const suggestionApplied = computed(() => {
+  const appliedId = props.suggestion?.category_id || createdCategoryId.value
+  return !!appliedId && Number(selectedCategoryId.value) === Number(appliedId)
+})
 
 const confidenceLabel = computed(() => {
   const confidence = Number(props.suggestion?.confidence ?? 0)
@@ -219,10 +242,58 @@ const confidenceClass = computed(() => {
   return 'bg-warning-100 text-warning-600'
 })
 
-function applySuggestion() {
+async function applySuggestion() {
   if (props.suggestion?.category_id) {
     selectedCategoryId.value = props.suggestion.category_id
+    return
   }
+
+  const newCategory = props.suggestion?.new_category
+  if (!newCategory?.name || creatingCategory.value) {
+    return
+  }
+
+  // O usuário pode ter criado a categoria por conta própria entre a sugestão e
+  // o clique — nesse caso reaproveitamos em vez de duplicar.
+  const existing = props.categories.find(
+    cat => cat.type === 'expense' && normalizeName(cat.name) === normalizeName(newCategory.name)
+  )
+
+  if (existing) {
+    createdCategoryId.value = existing.id
+    selectedCategoryId.value = existing.id
+    return
+  }
+
+  creatingCategory.value = true
+  error.value = null
+
+  try {
+    const category = await categoryService.create({
+      name: newCategory.name,
+      type: 'expense',
+      icon: newCategory.icon || '📁',
+      color: newCategory.color || '#6366f1',
+    })
+
+    createdCategoryId.value = category.id
+    selectedCategoryId.value = category.id
+    emit('category-created', category)
+  } catch (err) {
+    error.value = err.response?.data?.message || 'Erro ao criar a categoria sugerida'
+    console.error('Error creating suggested category:', err)
+  } finally {
+    creatingCategory.value = false
+  }
+}
+
+function normalizeName(name) {
+  return String(name || '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
 }
 
 // Pré-seleciona a sugestão assim que ela chega, sem sobrescrever uma escolha manual

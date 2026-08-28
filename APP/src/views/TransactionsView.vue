@@ -640,7 +640,7 @@ const suggestionsById = computed(() =>
 const suggestionCount = computed(() => suggestions.value.length)
 
 const highConfidenceSuggestions = computed(() =>
-  suggestions.value.filter(s => s.category_id && s.confidence >= minConfidence.value)
+  suggestions.value.filter(s => (s.category_id || s.new_category) && s.confidence >= minConfidence.value)
 )
 
 const categoryOptions = computed(() => {
@@ -1082,8 +1082,8 @@ async function suggestCategories() {
     minConfidence.value = response.min_confidence ?? minConfidence.value
     analyzedCount.value = response.analyzed ?? 0
 
-    // Só interessam as sugestões que apontaram para alguma categoria
-    suggestions.value = (response.suggestions || []).filter(s => s.category_id)
+    // Só interessam as sugestões que apontaram para alguma categoria — existente ou nova
+    suggestions.value = (response.suggestions || []).filter(s => s.category_id || s.new_category)
 
     if (suggestions.value.length === 0) {
       showError('A IA não conseguiu sugerir categorias para estas transações.')
@@ -1108,9 +1108,15 @@ async function applyHighConfidence() {
     const response = await aiCategorizationService.apply(toApply)
     const appliedIds = response.applied_ids || []
 
+    const createdCategories = response.created_categories || []
+
     if (appliedIds.length > 0) {
       handleCategorized(appliedIds)
-      success(`${appliedIds.length} transação(ões) categorizadas`)
+      success(
+        createdCategories.length > 0
+          ? `${appliedIds.length} transação(ões) categorizadas — ${createdCategories.length} categoria(s) nova(s) criada(s)`
+          : `${appliedIds.length} transação(ões) categorizadas`
+      )
     }
 
     // Mantém em tela apenas o que exigia revisão manual

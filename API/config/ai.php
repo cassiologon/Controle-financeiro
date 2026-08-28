@@ -62,8 +62,10 @@ return [
     |--------------------------------------------------------------------------
     |
     | Configuração do agente que sugere categorias para transações pendentes ou
-    | sem categoria. O lote é limitado para manter o prompt curto e a resposta
-    | previsível, e a confiança mínima define o que pode ser aplicado em massa.
+    | sem categoria. O `batch_size` limita quantos gastos distintos vão ao
+    | modelo (parcelas e repetições do mesmo estabelecimento contam como um), o
+    | `fetch_limit` limita quantas transações são lidas do banco para esse
+    | agrupamento, e a confiança mínima define o que pode ser aplicado em massa.
     |
     */
 
@@ -73,6 +75,7 @@ return [
         'reasoning_effort' => env('AI_CATEGORIZATION_REASONING_EFFORT', 'low'),
         'timeout' => env('AI_CATEGORIZATION_TIMEOUT', 120),
         'batch_size' => env('AI_CATEGORIZATION_BATCH_SIZE', 40),
+        'fetch_limit' => env('AI_CATEGORIZATION_FETCH_LIMIT', 400),
         'min_confidence' => env('AI_CATEGORIZATION_MIN_CONFIDENCE', 0.7),
     ],
 

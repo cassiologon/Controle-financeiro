@@ -28,10 +28,18 @@ Contexto sobre as descrições:
 - Estabelecimentos conhecidos do Brasil devem ser reconhecidos pelo que vendem (ex: Drogasil = farmácia, Posto Ipiranga = combustível, Assaí = mercado).
 
 Regras obrigatórias:
-- Use APENAS categorias da lista fornecida, sempre pelo `id` exato. Nunca invente categoria nova nem devolva id fora da lista.
-- Quando nenhuma categoria da lista servir, devolva `category_id: 0`, `confidence: 0` e explique em `reason` o que faltou.
+- Prefira SEMPRE uma categoria da lista fornecida, pelo `id` exato. Nunca devolva um id que não esteja na lista.
+- Só quando nenhuma categoria da lista servir, devolva `category_id: 0` e proponha uma categoria nova em `new_category_name` — ela será criada para o usuário.
 - Devolva exatamente uma sugestão para CADA transação recebida, usando o `transaction_id` exato de entrada. Não invente transações.
 - As `keywords` das categorias são o histórico de acertos do usuário — se a descrição bate com uma keyword existente, essa categoria é quase sempre a resposta certa e a confiança deve ser alta.
+
+Categoria nova (`new_category_name` e `new_category_icon`):
+- Preencha os dois APENAS quando `category_id` for 0. Quando usar uma categoria da lista, devolva os dois como string vazia.
+- `new_category_name`: nome curto em português, no singular e capitalizado, do tipo que serve para muitos gastos parecidos ("Farmácia", "Combustível", "Material de Construção"). Nunca use o nome do estabelecimento ("Drogasil", "Merkel Elétrica") nem nomes longos ou com barra.
+- Antes de propor, releia a lista: se já existe categoria equivalente com outro nome ou grafia, use o `id` dela em vez de criar outra.
+- Reaproveite o mesmo nome dentro do lote: dois gastos do mesmo tipo devem propor exatamente a mesma categoria nova, escrita igual.
+- `new_category_icon`: um único emoji que represente a categoria ("💊", "⛽", "🔧").
+- A confiança de uma categoria nova segue a mesma régua: ela mede o quanto você reconheceu o gasto, não o quanto gostou do nome.
 
 Como calibrar `confidence` (0 a 1):
 - 0.9–1.0: estabelecimento reconhecido sem ambiguidade ou keyword da categoria presente na descrição.
@@ -61,8 +69,16 @@ PROMPT;
                         ->required(),
 
                     'category_id' => $schema->integer()
-                        ->description('Id de uma categoria da lista, ou 0 quando nenhuma serve.')
+                        ->description('Id de uma categoria da lista, ou 0 quando nenhuma serve e uma nova é proposta.')
                         ->min(0)
+                        ->required(),
+
+                    'new_category_name' => $schema->string()
+                        ->description('Nome da categoria a criar quando category_id for 0. String vazia caso contrário.')
+                        ->required(),
+
+                    'new_category_icon' => $schema->string()
+                        ->description('Um emoji para a categoria nova. String vazia quando category_id não for 0.')
                         ->required(),
 
                     'confidence' => $schema->number()
@@ -77,7 +93,7 @@ PROMPT;
                         ->required(),
 
                     'reason' => $schema->string()
-                        ->description('Frase curta explicando a escolha.')
+                        ->description('Frase curta explicando a escolha da categoria, existente ou nova.')
                         ->required(),
                 ]))
                 ->required(),

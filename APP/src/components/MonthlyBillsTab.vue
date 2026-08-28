@@ -32,6 +32,9 @@
             <div class="text-center">
               <p class="text-xs font-medium text-gray-500 uppercase tracking-wider">Despesas</p>
               <p class="text-lg font-bold text-error-600">R$ {{ formatCurrency(totalExpenses) }}</p>
+              <p v-if="invoicesTotalCredits > 0" class="text-[11px] text-gray-400">
+                líquido de R$ {{ formatCurrency(invoicesTotalCredits) }}
+              </p>
             </div>
             <div class="w-px h-10 bg-gray-200"></div>
             <div class="flex gap-1 items-center">
@@ -111,10 +114,21 @@
                 <div class="flex-1 min-w-0">
                   <p class="text-sm font-semibold text-gray-900 truncate">Fatura {{ invoice.bank_name }}</p>
                   <p class="text-xs text-gray-400">{{ formatPeriod(invoice.period_start, invoice.period_end) }}</p>
+                  <p v-if="invoice.total_credits > 0" class="text-[11px] text-gray-400 mt-0.5">
+                    <span class="text-gray-500">R$ {{ formatCurrency(invoice.total_charges) }}</span>
+                    em gastos
+                    <span class="text-emerald-600 font-medium">&minus; R$ {{ formatCurrency(invoice.total_credits) }}</span>
+                    em abatimentos
+                  </p>
                 </div>
-                <p class="text-sm font-bold whitespace-nowrap text-red-600">
-                  R$ {{ formatCurrency(invoice.total) }}
-                </p>
+                <div class="text-right whitespace-nowrap">
+                  <p class="text-sm font-bold text-red-600">
+                    R$ {{ formatCurrency(invoice.total) }}
+                  </p>
+                  <p v-if="invoice.total_credits > 0" class="text-[10px] uppercase tracking-wider text-gray-400">
+                    a pagar
+                  </p>
+                </div>
                 <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
                   <button
                     @click.stop="confirmDeleteInvoice(invoice)"
@@ -499,8 +513,18 @@ const incomeBills = computed(() => statusFilteredBills.value.filter(b => b.type 
 
 const activeBills = computed(() => bills.value.filter(b => b.is_active))
 
+// Gastos brutos lançados nas faturas do período.
+const invoicesTotalCharges = computed(() =>
+  invoiceSummaries.value.reduce((sum, inv) => sum + Number(inv.total_charges ?? inv.total), 0)
+)
+
+// Pagamentos antecipados, estornos e descontos creditados dentro da fatura.
+const invoicesTotalCredits = computed(() =>
+  invoiceSummaries.value.reduce((sum, inv) => sum + Number(inv.total_credits ?? 0), 0)
+)
+
 const invoicesTotalExpense = computed(() =>
-  invoiceSummaries.value.reduce((sum, inv) => sum + inv.total, 0)
+  invoicesTotalCharges.value - invoicesTotalCredits.value
 )
 
 const totalExpenses = computed(() =>

@@ -86,22 +86,25 @@ class InvoiceConfigController extends Controller
                 ->whereBetween('date', [$periodStart->toDateString(), $periodEnd->toDateString()])
                 ->get(['type', 'amount']);
 
-            $totalExpenses = (float) $transactions
+            // Gastos brutos do período: tudo que foi lançado como despesa no cartão.
+            $totalCharges = round((float) $transactions
                 ->where('type', 'expense')
-                ->sum('amount');
+                ->sum('amount'), 2);
 
-            $totalIncome = (float) $transactions
+            // Abatimentos: pagamentos antecipados, estornos e descontos que o banco
+            // credita dentro da própria fatura e reduzem o valor a pagar.
+            $totalCredits = round((float) $transactions
                 ->where('type', 'income')
-                ->sum('amount');
-
-            $total = $totalExpenses - $totalIncome;
+                ->sum('amount'), 2);
 
             $summaries[] = [
                 'id' => $config->id,
                 'bank_name' => $config->bank_name,
                 'closing_day' => $config->closing_day,
                 'is_active' => $config->is_active,
-                'total' => (float) $total,
+                'total_charges' => $totalCharges,
+                'total_credits' => $totalCredits,
+                'total' => round($totalCharges - $totalCredits, 2),
                 'period_start' => $periodStart->toDateString(),
                 'period_end' => $periodEnd->toDateString(),
             ];

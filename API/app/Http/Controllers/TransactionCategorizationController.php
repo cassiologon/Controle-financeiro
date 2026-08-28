@@ -4,10 +4,12 @@ namespace App\Http\Controllers;
 
 use App\Models\Category;
 use App\Models\Transaction;
+use App\Services\CategoryMatcherService;
 use App\Services\KeywordExtractorService;
 use App\Services\TransactionCategorizerService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
 
@@ -15,9 +17,9 @@ class TransactionCategorizationController extends Controller
 {
     public function __construct(
         private TransactionCategorizerService $categorizerService,
-        private KeywordExtractorService $keywordExtractor
-    ) {
-    }
+        private KeywordExtractorService $keywordExtractor,
+        private CategoryMatcherService $matcher
+    ) {}
 
     /**
      * Gera sugestões de categoria para transações pendentes ou sem categoria.
@@ -34,6 +36,11 @@ class TransactionCategorizationController extends Controller
         $userId = $request->user()->id;
         $scope = $validated['scope'] ?? 'pending';
         $limit = (int) ($validated['limit'] ?? config('ai.categorization.batch_size'));
+
+        // O lote da IA conta grupos distintos, não linhas: buscamos um universo
+        // maior para que parcelas e repetições do mesmo estabelecimento sejam
+        // agrupadas e resolvidas de uma vez.
+        $fetchLimit = max($limit, (int) config('ai.categorization.fetch_limit'));
 
         $categories = Category::where('user_id', $userId)
             ->where('type', 'expense')
@@ -62,7 +69,7 @@ class TransactionCategorizationController extends Controller
         $transactions = $query
             ->orderBy('date', 'desc')
             ->orderBy('created_at', 'desc')
-            ->limit($limit)
+            ->limit($fetchLimit)
             ->get();
 
         if ($transactions->isEmpty()) {
@@ -75,7 +82,7 @@ class TransactionCategorizationController extends Controller
         }
 
         try {
-            $suggestions = $this->categorizerService->suggest($transactions, $categories);
+            $suggestions = $this->categorizerService->suggest($transactions, $categories, $limit);
         } catch (RuntimeException $e) {
             Log::info('Falha ao sugerir categorias', [
                 'user_id' => $userId,
@@ -109,20 +116,25 @@ class TransactionCategorizationController extends Controller
 
         return response()->json([
             'suggestions' => $payload,
-            'analyzed' => $transactions->count(),
+            'analyzed' => count($payload),
             'min_confidence' => (float) config('ai.categorization.min_confidence'),
         ]);
     }
 
     /**
-     * Aplica as sugestões confirmadas pelo usuário.
+     * Aplica as sugestões confirmadas pelo usuário, criando as categorias que
+     * a IA propôs e que ainda não existem.
      */
     public function apply(Request $request): JsonResponse
     {
         $validated = $request->validate([
             'suggestions' => 'required|array|min:1',
             'suggestions.*.transaction_id' => 'required|integer',
-            'suggestions.*.category_id' => 'required|integer',
+            'suggestions.*.category_id' => 'nullable|integer',
+            'suggestions.*.new_category' => 'nullable|array',
+            'suggestions.*.new_category.name' => 'required_with:suggestions.*.new_category|string|max:60',
+            'suggestions.*.new_category.icon' => 'nullable|string|max:16',
+            'suggestions.*.new_category.color' => 'nullable|string|max:7',
             'suggestions.*.keywords' => 'sometimes|array',
             'suggestions.*.keywords.*' => 'string|max:100',
         ]);
@@ -135,16 +147,20 @@ class TransactionCategorizationController extends Controller
             ->keyBy('id');
 
         $categories = Category::where('user_id', $userId)
-            ->whereIn('id', collect($validated['suggestions'])->pluck('category_id')->unique())
+            ->where('type', 'expense')
             ->get()
             ->keyBy('id');
 
         $appliedIds = [];
         $skipped = [];
+        $createdCategories = [];
 
         foreach ($validated['suggestions'] as $suggestion) {
             $transaction = $transactions->get($suggestion['transaction_id']);
-            $category = $categories->get($suggestion['category_id']);
+
+            $category = ! empty($suggestion['category_id'])
+                ? $categories->get($suggestion['category_id'])
+                : $this->resolveNewCategory($userId, $suggestion['new_category'] ?? null, $categories, $createdCategories);
 
             if (! $transaction || ! $category) {
                 $skipped[] = $suggestion['transaction_id'];
@@ -166,13 +182,63 @@ class TransactionCategorizationController extends Controller
             'user_id' => $userId,
             'applied' => count($appliedIds),
             'skipped' => count($skipped),
+            'created_categories' => count($createdCategories),
         ]);
 
         return response()->json([
             'applied_ids' => $appliedIds,
             'applied' => count($appliedIds),
             'skipped' => $skipped,
+            'created_categories' => array_values($createdCategories),
         ]);
+    }
+
+    /**
+     * Devolve a categoria da sugestão de categoria nova: reaproveita uma
+     * equivalente do usuário quando existe e cria só quando é realmente nova.
+     *
+     * @param  array<string, mixed>|null  $newCategory
+     * @param  \Illuminate\Support\Collection<int, Category>  $categories
+     * @param  array<string, array<string, mixed>>  $createdCategories
+     */
+    private function resolveNewCategory(int $userId, ?array $newCategory, Collection $categories, array &$createdCategories): ?Category
+    {
+        $name = trim((string) ($newCategory['name'] ?? ''));
+
+        if ($name === '') {
+            return null;
+        }
+
+        $slug = $this->matcher->normalizeName($name);
+
+        $existing = $categories->first(
+            fn (Category $category) => $this->matcher->normalizeName((string) $category->name) === $slug
+        );
+
+        if ($existing) {
+            return $existing;
+        }
+
+        $category = Category::create([
+            'user_id' => $userId,
+            'name' => $name,
+            'type' => 'expense',
+            'icon' => $newCategory['icon'] ?? '📁',
+            'color' => $newCategory['color'] ?? '#6366f1',
+            'keywords' => [],
+        ]);
+
+        // Mantém a categoria recém-criada visível para as próximas sugestões
+        // do mesmo lote, que costumam propor o mesmo nome.
+        $categories->put($category->id, $category);
+        $createdCategories[$slug] = [
+            'id' => $category->id,
+            'name' => $category->name,
+            'icon' => $category->icon,
+            'color' => $category->color,
+        ];
+
+        return $category;
     }
 
     /**
@@ -199,7 +265,7 @@ class TransactionCategorizationController extends Controller
             }
         } catch (\Exception $e) {
             // Aprender keywords é secundário: não deve derrubar a categorização.
-            Log::error('Erro ao aprender keywords da sugestão de IA: ' . $e->getMessage(), [
+            Log::error('Erro ao aprender keywords da sugestão de IA: '.$e->getMessage(), [
                 'category_id' => $category->id,
                 'transaction_id' => $transaction->id,
             ]);
