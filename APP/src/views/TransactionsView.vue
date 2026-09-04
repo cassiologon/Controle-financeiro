@@ -179,10 +179,52 @@
             <p class="text-sm text-gray-500">{{ pendingTransactions.total }} transação(ões) aguardando categorização</p>
           </div>
         </div>
-        <Button variant="secondary" size="sm" @click="showPending = !showPending">
-          {{ showPending ? 'Ocultar' : 'Mostrar' }}
-        </Button>
+        <div class="flex items-center gap-2">
+          <Button
+            variant="primary"
+            size="sm"
+            @click="suggestCategories"
+            :loading="suggesting"
+            :disabled="suggesting"
+          >
+            <span class="mr-1.5">✨</span>
+            {{ suggesting ? 'Analisando...' : 'Sugerir com IA' }}
+          </Button>
+          <Button variant="secondary" size="sm" @click="showPending = !showPending">
+            {{ showPending ? 'Ocultar' : 'Mostrar' }}
+          </Button>
+        </div>
       </div>
+
+      <!-- Resumo das sugestões -->
+      <div
+        v-if="suggestionCount > 0"
+        class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-primary-50 border border-primary-200 px-4 py-3"
+      >
+        <p class="text-sm text-primary-800">
+          <strong>{{ suggestionCount }}</strong> sugestão(ões) em {{ analyzedCount }} transação(ões) analisadas —
+          <strong>{{ highConfidenceSuggestions.length }}</strong> com confiança de
+          {{ Math.round(minConfidence * 100) }}% ou mais.
+          <span v-if="analyzedCount < pendingTransactions.total" class="block text-xs text-primary-700 mt-0.5">
+            A análise roda em lotes; clique em "Sugerir com IA" de novo para as {{ pendingTransactions.total - analyzedCount }} restantes.
+          </span>
+        </p>
+        <div class="flex items-center gap-2">
+          <Button
+            variant="primary"
+            size="sm"
+            @click="applyHighConfidence"
+            :loading="applying"
+            :disabled="applying || highConfidenceSuggestions.length === 0"
+          >
+            Aplicar {{ highConfidenceSuggestions.length }} sugestão(ões)
+          </Button>
+          <Button variant="secondary" size="sm" @click="clearSuggestions" :disabled="applying">
+            Descartar
+          </Button>
+        </div>
+      </div>
+
       <div v-if="showPending" class="space-y-4">
         <PendingTransactionCard
           v-for="(transaction, index) in pendingTransactions.data"
@@ -190,6 +232,7 @@
           :transaction="transaction"
           :index="index"
           :categories="categories"
+          :suggestion="suggestionsById[transaction.id] || null"
           @categorized="handleCategorized"
           @delete="deletePendingTransaction"
           @category-created="loadCategories"
@@ -388,40 +431,72 @@
             <input
               ref="fileInput"
               type="file"
-              accept="application/pdf,.pdf,text/csv,.csv"
+              multiple
+              accept="application/pdf,.pdf,text/csv,.csv,.ofx"
               @change="handleFileSelect"
               class="hidden"
             />
-            <div v-if="!selectedFile" class="space-y-4">
+            <div v-if="!selectedFiles.length" class="space-y-4">
               <div class="w-16 h-16 mx-auto rounded-full bg-primary-100 flex items-center justify-center">
                 <svg class="w-8 h-8 text-primary-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                 </svg>
               </div>
               <div>
-                <p class="text-gray-700 font-semibold mb-1">Arraste o arquivo aqui ou clique para selecionar</p>
-                <p class="text-sm text-gray-500">Formatos aceitos: PDF (Mercado Pago e Santander) ou CSV (Nubank)</p>
+                <p class="text-gray-700 font-semibold mb-1">Arraste os arquivos aqui ou clique para selecionar</p>
+                <p class="text-sm text-gray-500">Formatos aceitos: OFX ou CSV (Nubank) e PDF (Mercado Pago e Santander)</p>
+                <p class="text-sm text-gray-500">Voce pode selecionar varias faturas de uma vez</p>
               </div>
               <Button variant="primary" @click="$refs.fileInput.click()">
-                Selecionar Arquivo
+                Selecionar Arquivos
               </Button>
             </div>
             <div v-else class="space-y-3">
-              <div class="w-16 h-16 mx-auto rounded-full bg-success-100 flex items-center justify-center">
-                <svg class="w-8 h-8 text-success-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
+              <div class="flex items-center justify-between">
+                <p class="text-sm font-semibold text-gray-700">
+                  {{ selectedFiles.length }} {{ selectedFiles.length === 1 ? 'arquivo selecionado' : 'arquivos selecionados' }}
+                </p>
+                <button
+                  type="button"
+                  class="text-sm text-gray-500 hover:text-error-600 transition-colors"
+                  @click="clearSelectedFiles"
+                >
+                  Limpar tudo
+                </button>
               </div>
-              <div>
-                <p class="text-gray-700 font-semibold">{{ selectedFile.name }}</p>
-                <p class="text-sm text-gray-500">{{ formatFileSize(selectedFile.size) }}</p>
-              </div>
-              <Button variant="secondary" size="sm" @click="selectedFile = null">
-                Remover
+              <ul class="space-y-2 max-h-56 overflow-y-auto text-left">
+                <li
+                  v-for="(file, index) in selectedFiles"
+                  :key="file.name + file.size + file.lastModified"
+                  class="flex items-center gap-3 p-2 rounded-lg bg-gray-50 border border-gray-200"
+                >
+                  <div class="w-8 h-8 shrink-0 rounded-full bg-success-100 flex items-center justify-center">
+                    <svg class="w-4 h-4 text-success-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  </div>
+                  <div class="min-w-0 flex-1">
+                    <p class="text-sm text-gray-700 font-medium truncate">{{ file.name }}</p>
+                    <p class="text-xs text-gray-500">{{ formatFileSize(file.size) }}</p>
+                  </div>
+                  <button
+                    type="button"
+                    class="shrink-0 text-gray-400 hover:text-error-600 transition-colors"
+                    :aria-label="`Remover ${file.name}`"
+                    @click="removeSelectedFile(index)"
+                  >
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </li>
+              </ul>
+              <Button variant="secondary" size="sm" @click="$refs.fileInput.click()">
+                Adicionar mais
               </Button>
             </div>
           </div>
-          <div v-if="selectedFile" class="space-y-4">
+          <div v-if="selectedFiles.length" class="space-y-4">
             <Select
               v-model="selectedBank"
               :options="bankOptions"
@@ -449,8 +524,8 @@
       </template>
       <template #footer>
         <Button variant="secondary" @click="closeImportModal">Cancelar</Button>
-        <Button @click="handleImport" variant="primary" :loading="importing" :disabled="!selectedFile || !selectedBank || (selectedBank === 'Outro' && !customBankName) || importing">
-          Importar
+        <Button @click="handleImport" variant="primary" :loading="importing" :disabled="!selectedFiles.length || !selectedBank || (selectedBank === 'Outro' && !customBankName) || importing">
+          {{ selectedFiles.length > 1 ? `Importar ${selectedFiles.length} faturas` : 'Importar' }}
         </Button>
       </template>
     </Modal>
@@ -463,6 +538,7 @@ import { ref, onMounted, computed, watch } from 'vue'
 import { transactionService } from '@/services/transactionService'
 import { categoryService } from '@/services/categoryService'
 import { invoiceImportService } from '@/services/invoiceImportService'
+import { aiCategorizationService } from '@/services/aiCategorizationService'
 import { useToast } from '@/composables/useToast'
 import Card from '@/components/Card.vue'
 import Button from '@/components/Button.vue'
@@ -500,7 +576,7 @@ const saving = ref(false)
 const showModal = ref(false)
 const editingTransaction = ref(null)
 const showImportModal = ref(false)
-const selectedFile = ref(null)
+const selectedFiles = ref([])
 const selectedBank = ref('')
 const customBankName = ref('')
 const customBankNameForm = ref('')
@@ -516,6 +592,11 @@ const pendingTransactions = ref({
   per_page: 100,
   total: 0,
 })
+const suggestions = ref([])
+const analyzedCount = ref(0)
+const suggesting = ref(false)
+const applying = ref(false)
+const minConfidence = ref(0.7)
 const showConfirmModal = ref(false)
 const transactionToDelete = ref(null)
 const isPendingTransaction = ref(false)
@@ -551,6 +632,16 @@ function getLocalTodayDate() {
   const day = String(now.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
 }
+
+const suggestionsById = computed(() =>
+  Object.fromEntries(suggestions.value.map(s => [s.transaction_id, s]))
+)
+
+const suggestionCount = computed(() => suggestions.value.length)
+
+const highConfidenceSuggestions = computed(() =>
+  suggestions.value.filter(s => (s.category_id || s.new_category) && s.confidence >= minConfidence.value)
+)
 
 const categoryOptions = computed(() => {
   const options = [{ value: '', label: 'Todas as categorias' }]
@@ -856,21 +947,51 @@ async function saveTransaction() {
 }
 
 function handleFileSelect(event) {
-  const file = event.target.files[0]
-  if (file) {
+  const files = Array.from(event.target.files || [])
+  if (!files.length) return
+
+  const accepted = []
+  const rejected = []
+
+  files.forEach((file) => {
     const extension = file.name.split('.').pop().toLowerCase()
-    if (['pdf', 'csv'].includes(extension)) {
-      selectedFile.value = file
-      importError.value = null
+    if (['pdf', 'csv', 'ofx'].includes(extension)) {
+      accepted.push(file)
     } else {
-      importError.value = 'Formato de arquivo não suportado. Use PDF ou CSV.'
-      selectedFile.value = null
+      rejected.push(file.name)
     }
-  }
+  })
+
+  // Permite escolher em varias etapas sem repetir o mesmo arquivo.
+  const isDuplicate = (file) =>
+    selectedFiles.value.some(
+      (existing) =>
+        existing.name === file.name &&
+        existing.size === file.size &&
+        existing.lastModified === file.lastModified
+    )
+
+  selectedFiles.value = [...selectedFiles.value, ...accepted.filter((file) => !isDuplicate(file))]
+
+  importError.value = rejected.length
+    ? `Formato não suportado (use PDF, CSV ou OFX): ${rejected.join(', ')}`
+    : null
+
+  // Zera o input para que reescolher o mesmo arquivo dispare o change de novo.
+  event.target.value = ''
+}
+
+function removeSelectedFile(index) {
+  selectedFiles.value.splice(index, 1)
+}
+
+function clearSelectedFiles() {
+  selectedFiles.value = []
+  importError.value = null
 }
 
 async function handleImport() {
-  if (!selectedFile.value) return
+  if (!selectedFiles.value.length) return
   
   // Validação do banco
   if (!selectedBank.value) {
@@ -890,9 +1011,20 @@ async function handleImport() {
 
   try {
     const bankName = selectedBank.value === 'Outro' ? customBankName.value : selectedBank.value
-    await invoiceImportService.uploadFile(selectedFile.value, bankName)
-    importSuccess.value = 'Arquivo enviado para processamento. As transações serão importadas em breve.'
-    selectedFile.value = null
+    const response = await invoiceImportService.uploadFiles(selectedFiles.value, bankName)
+
+    const failed = response?.failed ?? []
+    const importedCount = response?.imported?.length ?? selectedFiles.value.length
+
+    importSuccess.value = importedCount === 1
+      ? 'Arquivo enviado para processamento. As transações serão importadas em breve.'
+      : `${importedCount} arquivos enviados para processamento. As transações serão importadas em breve.`
+
+    if (failed.length) {
+      importError.value = `Não foi possível processar: ${failed.map((item) => item.file).join(', ')}`
+    }
+
+    selectedFiles.value = []
     
     // Recarrega transações e pendentes após um delay
     setTimeout(async () => {
@@ -901,10 +1033,13 @@ async function handleImport() {
       await loadPendingTransactions()
     }, 2000)
     
-    // Fecha modal após 3 segundos
-    setTimeout(() => {
-      closeImportModal()
-    }, 3000)
+    // Fecha modal após 3 segundos, salvo quando algum arquivo falhou e o
+    // usuário ainda precisa ler quais foram.
+    if (!failed.length) {
+      setTimeout(() => {
+        closeImportModal()
+      }, 3000)
+    }
   } catch (error) {
     importError.value = error.response?.data?.message || 'Erro ao importar arquivo. Tente novamente.'
     console.error('Error importing file:', error)
@@ -915,7 +1050,7 @@ async function handleImport() {
 
 function closeImportModal() {
   showImportModal.value = false
-  selectedFile.value = null
+  selectedFiles.value = []
   selectedBank.value = ''
   customBankName.value = ''
   importError.value = null
@@ -940,6 +1075,66 @@ async function loadPendingTransactions() {
   }
 }
 
+async function suggestCategories() {
+  suggesting.value = true
+  try {
+    const response = await aiCategorizationService.suggest({ scope: 'pending' })
+    minConfidence.value = response.min_confidence ?? minConfidence.value
+    analyzedCount.value = response.analyzed ?? 0
+
+    // Só interessam as sugestões que apontaram para alguma categoria — existente ou nova
+    suggestions.value = (response.suggestions || []).filter(s => s.category_id || s.new_category)
+
+    if (suggestions.value.length === 0) {
+      showError('A IA não conseguiu sugerir categorias para estas transações.')
+    } else {
+      success(`${suggestions.value.length} sugestão(ões) prontas para revisão`)
+      showPending.value = true
+    }
+  } catch (error) {
+    console.error('Error suggesting categories:', error)
+    showError(error.response?.data?.message || 'Erro ao gerar sugestões de categoria')
+  } finally {
+    suggesting.value = false
+  }
+}
+
+async function applyHighConfidence() {
+  const toApply = highConfidenceSuggestions.value
+  if (toApply.length === 0) return
+
+  applying.value = true
+  try {
+    const response = await aiCategorizationService.apply(toApply)
+    const appliedIds = response.applied_ids || []
+
+    const createdCategories = response.created_categories || []
+
+    if (appliedIds.length > 0) {
+      handleCategorized(appliedIds)
+      success(
+        createdCategories.length > 0
+          ? `${appliedIds.length} transação(ões) categorizadas — ${createdCategories.length} categoria(s) nova(s) criada(s)`
+          : `${appliedIds.length} transação(ões) categorizadas`
+      )
+    }
+
+    // Mantém em tela apenas o que exigia revisão manual
+    suggestions.value = suggestions.value.filter(s => !appliedIds.includes(s.transaction_id))
+    await loadCategories()
+  } catch (error) {
+    console.error('Error applying suggestions:', error)
+    showError(error.response?.data?.message || 'Erro ao aplicar sugestões')
+  } finally {
+    applying.value = false
+  }
+}
+
+function clearSuggestions() {
+  suggestions.value = []
+  analyzedCount.value = 0
+}
+
 function handleCategorized(transactionIds) {
   // Garante que transactionIds seja um array
   const idsToRemove = Array.isArray(transactionIds) ? transactionIds : [transactionIds]
@@ -950,7 +1145,11 @@ function handleCategorized(transactionIds) {
     t => !idsToRemove.includes(t.id)
   )
   pendingTransactions.value.total -= removedCount
-  
+
+  suggestions.value = suggestions.value.filter(
+    s => !idsToRemove.includes(s.transaction_id)
+  )
+
   // Recarrega transações normais
   loadTransactions(transactions.value.current_page)
 }

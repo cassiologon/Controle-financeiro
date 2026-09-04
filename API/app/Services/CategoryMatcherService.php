@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Category;
+use Illuminate\Support\Str;
 
 class CategoryMatcherService
 {
@@ -15,18 +16,18 @@ class CategoryMatcherService
             ->where('type', 'expense')
             ->whereNotNull('keywords')
             ->get();
-        
+
         foreach ($categories as $category) {
             if ($category->keywords && is_array($category->keywords) && count($category->keywords) > 0) {
                 // Verifica se há pelo menos uma keyword não vazia
                 foreach ($category->keywords as $keyword) {
-                    if (!empty(trim($keyword))) {
+                    if (! empty(trim($keyword))) {
                         return true;
                     }
                 }
             }
         }
-        
+
         return false;
     }
 
@@ -41,21 +42,21 @@ class CategoryMatcherService
             ->where('type', 'expense')
             ->whereNotNull('keywords')
             ->get();
-        
+
         $descriptionLower = strtolower(trim($description));
-        
+
         // Divide a descrição em palavras
         $words = preg_split('/\s+/', $descriptionLower);
-        
+
         // Para cada categoria, verifica se alguma palavra-chave está na descrição
         foreach ($categories as $category) {
-            if (!$category->keywords || !is_array($category->keywords)) {
+            if (! $category->keywords || ! is_array($category->keywords)) {
                 continue;
             }
-            
+
             foreach ($category->keywords as $keyword) {
                 $keywordLower = strtolower(trim($keyword));
-                
+
                 // Verifica se a palavra-chave está na descrição
                 // Pode ser uma palavra completa ou parte de uma palavra
                 if (strlen($keywordLower) > 2) {
@@ -63,7 +64,7 @@ class CategoryMatcherService
                     if (in_array($keywordLower, $words)) {
                         return $category;
                     }
-                    
+
                     // Busca como substring (ex: "burguer" em "brutus burguer")
                     if (strpos($descriptionLower, $keywordLower) !== false) {
                         return $category;
@@ -71,8 +72,19 @@ class CategoryMatcherService
                 }
             }
         }
-        
+
         return null;
+    }
+
+    /**
+     * Normaliza um nome de categoria para comparação, ignorando acento, caixa
+     * e pontuação — "Farmácia", "farmacia" e "Farmacia!" viram a mesma coisa.
+     */
+    public function normalizeName(string $name): string
+    {
+        $normalized = mb_strtolower(Str::ascii($name), 'UTF-8');
+
+        return trim((string) preg_replace('/[^a-z0-9]+/', ' ', $normalized));
     }
 
     /**
@@ -80,7 +92,7 @@ class CategoryMatcherService
      */
     public function matchesCategory(string $description, Category $category): bool
     {
-        if (!$category->keywords || !is_array($category->keywords) || count($category->keywords) === 0) {
+        if (! $category->keywords || ! is_array($category->keywords) || count($category->keywords) === 0) {
             return false;
         }
 
@@ -107,4 +119,3 @@ class CategoryMatcherService
         return false;
     }
 }
-

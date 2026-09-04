@@ -24,6 +24,14 @@ class ProcessInvoiceImport implements ShouldQueue
     private array $importFingerprintCounts = [];
 
     /**
+     * IDs de parcelas ja criadas ou reconciliadas nesta importacao.
+     * Impede que duas compras distintas disputem o mesmo slot.
+     *
+     * @var array<int, int>
+     */
+    private array $reconciledIds = [];
+
+    /**
      * Create a new job instance.
      */
     public function __construct(
@@ -89,6 +97,7 @@ class ProcessInvoiceImport implements ShouldQueue
                 $transactions = match ($fileType) {
                     'csv' => $parserService->parseCsv($this->filePath),
                     'pdf' => $parserService->parsePdf($this->filePath),
+                    'ofx' => $parserService->parseOfx($this->filePath),
                     default => throw new \RuntimeException("Tipo de arquivo não suportado: {$fileType}"),
                 };
                 Log::info("Extraídas " . count($transactions) . " transações do arquivo");
@@ -111,6 +120,7 @@ class ProcessInvoiceImport implements ShouldQueue
             }
 
             $this->importFingerprintCounts = [];
+            $this->reconciledIds = [];
 
             // Processa cada transação
             foreach ($transactions as $transactionData) {
@@ -149,10 +159,15 @@ class ProcessInvoiceImport implements ShouldQueue
                         'date' => $transactionData['date'],
                         'status' => $category ? 'categorized' : 'pending',
                         'bank_name' => $this->bankName,
+                        'external_id' => $transactionData['external_id'] ?? null,
+                        'external_ref' => $transactionData['external_ref'] ?? null,
                         'is_installment' => $isInstallment,
                     ];
 
-                    $transaction = $this->createTransactionIfNotExists($basePayload);
+                    $transaction = $this->createTransactionIfNotExists(
+                        $basePayload,
+                        $isInstallment ? ['is_actual' => true] : null
+                    );
                     
                     // Log para debug (apenas primeira transação)
                     if ($transaction && $processed === 0) {
@@ -202,7 +217,10 @@ class ProcessInvoiceImport implements ShouldQueue
                                     'is_installment' => true,
                                 ];
 
-                                $futureTransaction = $this->createTransactionIfNotExists($futurePayload);
+                                $futureTransaction = $this->createTransactionIfNotExists(
+                                    $futurePayload,
+                                    ['is_actual' => false]
+                                );
                                 if ($futureTransaction) {
                                     $processed++;
                                     if ($category) {
@@ -245,8 +263,69 @@ class ProcessInvoiceImport implements ShouldQueue
         }
     }
 
-    private function createTransactionIfNotExists(array $payload): ?Transaction
+    private function createTransactionIfNotExists(array $payload, ?array $installment = null): ?Transaction
     {
+        // O OFX traz uma chave deterministica por lancamento: quando existe, ela
+        // decide sozinha se a transacao ja foi importada.
+        if (!empty($payload['external_ref'])) {
+            $ref = $payload['external_ref'];
+            $this->importFingerprintCounts[$ref] = ($this->importFingerprintCounts[$ref] ?? 0) + 1;
+
+            $existing = Transaction::query()
+                ->where('user_id', $payload['user_id'])
+                ->where('bank_name', $payload['bank_name'])
+                ->where('external_ref', $ref)
+                ->count();
+
+            if ($existing >= $this->importFingerprintCounts[$ref]) {
+                return null;
+            }
+
+            // A parcela real pode ja existir como projecao (sem external_ref) de uma
+            // fatura anterior: reaproveita o registro em vez de duplicar.
+            if ($installment !== null) {
+                $slot = $this->findInstallmentSlot($payload);
+
+                if ($slot !== null) {
+                    $this->reconciledIds[] = $slot->id;
+                    $slot->update([
+                        'amount' => $payload['amount'],
+                        'date' => $payload['date'],
+                        'external_id' => $payload['external_id'] ?? null,
+                        'external_ref' => $ref,
+                    ]);
+
+                    return null;
+                }
+            }
+
+            // A mesma fatura pode ter sido importada antes em CSV ou PDF, formatos
+            // sem identificador. Nesse caso o OFX adota o lancamento existente e lhe
+            // da identidade, em vez de criar um segundo registro do mesmo gasto.
+            $legacy = $this->findEquivalentWithoutRef($payload);
+
+            if ($legacy !== null) {
+                $this->reconciledIds[] = $legacy->id;
+                $legacy->update([
+                    'external_id' => $payload['external_id'] ?? null,
+                    'external_ref' => $ref,
+                ]);
+
+                Log::info("Lancamento importado sem identificador adotado pelo OFX", [
+                    'transaction_id' => $legacy->id,
+                    'description' => $payload['description'],
+                    'external_ref' => $ref,
+                ]);
+
+                return null;
+            }
+
+            $transaction = Transaction::create($payload);
+            $this->reconciledIds[] = $transaction->id;
+
+            return $transaction;
+        }
+
         $fingerprint = $this->buildTransactionFingerprint($payload);
         $this->importFingerprintCounts[$fingerprint] = ($this->importFingerprintCounts[$fingerprint] ?? 0) + 1;
         $requiredCount = $this->importFingerprintCounts[$fingerprint];
@@ -257,7 +336,98 @@ class ProcessInvoiceImport implements ShouldQueue
             return null;
         }
 
-        return Transaction::create($payload);
+        // Parcelas projetadas por uma fatura anterior ocupam o mesmo "slot" (mesma
+        // serie, mesma parcela, mesmo mes) da linha que chega na fatura seguinte.
+        // Sem reconciliar, a divergencia de centavos ou do dia de fechamento faz o
+        // fingerprint diferir e a mesma parcela vira dois registros.
+        if ($installment !== null) {
+            $slot = $this->findInstallmentSlot($payload);
+
+            if ($slot !== null) {
+                $this->reconciledIds[] = $slot->id;
+
+                // O dado da fatura real prevalece sobre a projecao.
+                if ($installment['is_actual'] ?? false) {
+                    $slot->update([
+                        'amount' => $payload['amount'],
+                        'date' => $payload['date'],
+                    ]);
+
+                    Log::info("Parcela projetada reconciliada com a fatura real", [
+                        'transaction_id' => $slot->id,
+                        'description' => $payload['description'],
+                        'amount' => $payload['amount'],
+                        'date' => $payload['date'],
+                    ]);
+                }
+
+                return null;
+            }
+        }
+
+        $transaction = Transaction::create($payload);
+
+        if ($installment !== null) {
+            $this->reconciledIds[] = $transaction->id;
+        }
+
+        return $transaction;
+    }
+
+    /**
+     * Procura um lancamento identico ja importado por um formato sem identificador
+     * (CSV ou PDF), para que o OFX o adote em vez de duplicar o mesmo gasto.
+     */
+    private function findEquivalentWithoutRef(array $payload): ?Transaction
+    {
+        $amount = round((float) $payload['amount'], 2);
+
+        return Transaction::query()
+            ->where('user_id', $payload['user_id'])
+            ->where('bank_name', $payload['bank_name'])
+            ->where('type', $payload['type'])
+            ->where('description', $payload['description'])
+            ->whereBetween('amount', [$amount - 0.005, $amount + 0.005])
+            ->whereDate('date', Carbon::parse($payload['date'])->toDateString())
+            ->whereNull('external_ref')
+            ->whereNotIn('id', $this->reconciledIds ?: [0])
+            ->orderBy('id')
+            ->first();
+    }
+
+    /**
+     * Procura uma parcela ja gravada que ocupe o mesmo slot do payload.
+     *
+     * A comparacao usa mes/ano em vez do dia exato e tolera variacao de centavos,
+     * porque a projecao herda o valor e o dia da parcela de origem enquanto a
+     * fatura real traz o valor cobrado e a data de fechamento do mes.
+     */
+    private function findInstallmentSlot(array $payload): ?Transaction
+    {
+        $date = Carbon::parse($payload['date']);
+        $amount = round((float) $payload['amount'], 2);
+        $tolerance = max(1.0, abs($amount) * 0.02);
+
+        return Transaction::query()
+            ->where('user_id', $payload['user_id'])
+            ->where('bank_name', $payload['bank_name'])
+            ->where('type', $payload['type'])
+            ->where('is_installment', true)
+            ->where('description', $payload['description'])
+            ->whereYear('date', $date->year)
+            ->whereMonth('date', $date->month)
+            ->whereBetween('amount', [$amount - $tolerance, $amount + $tolerance])
+            ->whereNotIn('id', $this->reconciledIds ?: [0])
+            // Nao rouba o slot de um lancamento que ja tem identidade propria do OFX.
+            ->where(function ($query) use ($payload) {
+                $query->whereNull('external_ref');
+
+                if (!empty($payload['external_ref'])) {
+                    $query->orWhere('external_ref', $payload['external_ref']);
+                }
+            })
+            ->orderBy('id')
+            ->first();
     }
 
     private function buildTransactionFingerprint(array $payload): string
@@ -267,19 +437,23 @@ class ProcessInvoiceImport implements ShouldQueue
             (string) $payload['type'],
             number_format((float) $payload['amount'], 2, '.', ''),
             (string) $payload['description'],
-            (string) $payload['date'],
+            Carbon::parse($payload['date'])->toDateString(),
             (string) $payload['bank_name'],
         ]);
     }
 
     private function countExistingTransactions(array $payload): int
     {
+        $amount = round((float) $payload['amount'], 2);
+
         return Transaction::query()
             ->where('user_id', $payload['user_id'])
             ->where('type', $payload['type'])
-            ->where('amount', number_format((float) $payload['amount'], 2, '.', ''))
+            // amount e coluna numerica: comparar com a string de number_format nunca casa.
+            ->whereBetween('amount', [$amount - 0.005, $amount + 0.005])
             ->where('description', $payload['description'])
-            ->where('date', $payload['date'])
+            // a coluna guarda "Y-m-d H:i:s"; comparar com "Y-m-d" cru nunca casa.
+            ->whereDate('date', Carbon::parse($payload['date'])->toDateString())
             ->where('bank_name', $payload['bank_name'])
             ->count();
     }

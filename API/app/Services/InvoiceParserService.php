@@ -6,6 +6,7 @@ use League\Csv\Reader;
 use Smalot\PdfParser\Parser;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
+use Carbon\Carbon;
 
 class InvoiceParserService
 {
@@ -27,7 +28,11 @@ class InvoiceParserService
             return 'pdf';
         }
 
-        throw new \InvalidArgumentException('Tipo de arquivo não suportado. Use CSV ou PDF.');
+        if ($extension === 'ofx') {
+            return 'ofx';
+        }
+
+        throw new \InvalidArgumentException('Tipo de arquivo não suportado. Use CSV, PDF ou OFX.');
     }
 
     /**
@@ -138,6 +143,151 @@ class InvoiceParserService
         }
 
         return $transactions;
+    }
+
+    /**
+     * Extrai transações de um arquivo OFX (formato SGML, versão 1.x).
+     *
+     * O OFX é preferível ao CSV porque cada lançamento traz FITID, TRNTYPE e a
+     * data com fuso — dispensa inferir o tipo pelo sinal do valor.
+     */
+    public function parseOfx(string $filePath): array
+    {
+        $transactions = [];
+
+        try {
+            $fullPath = $this->resolveFullPath($filePath);
+
+            Log::info("Processando OFX: {$fullPath}");
+
+            $contents = file_get_contents($fullPath);
+            if ($contents === false) {
+                throw new \RuntimeException("Não foi possível ler o arquivo: {$fullPath}");
+            }
+
+            // O cabeçalho declara CHARSET:1252; normaliza para UTF-8 quando necessário.
+            if (!mb_check_encoding($contents, 'UTF-8')) {
+                $contents = mb_convert_encoding($contents, 'UTF-8', 'Windows-1252');
+            }
+
+            if (!preg_match_all('/<STMTTRN>(.*?)<\/STMTTRN>/is', $contents, $matches)) {
+                Log::warning("Nenhum bloco STMTTRN encontrado no OFX", ['file_path' => $filePath]);
+                return [];
+            }
+
+            $ignored = 0;
+
+            foreach ($matches[1] as $block) {
+                $trnType = $this->extractOfxTag($block, 'TRNTYPE');
+                $posted = $this->extractOfxTag($block, 'DTPOSTED');
+                $rawAmount = $this->extractOfxTag($block, 'TRNAMT');
+                $fitId = $this->extractOfxTag($block, 'FITID');
+                $memo = $this->extractOfxTag($block, 'MEMO') ?? $this->extractOfxTag($block, 'NAME');
+
+                $date = $this->parseOfxDate($posted);
+                $amount = $rawAmount !== null ? (float) str_replace(',', '.', $rawAmount) : null;
+
+                if ($date === null || $amount === null || $memo === null || trim($memo) === '') {
+                    $ignored++;
+                    continue;
+                }
+
+                // No OFX de cartão a despesa vem negativa e o crédito positivo —
+                // convenção oposta à do CSV do Nubank.
+                $type = $amount < 0 ? 'expense' : 'income';
+
+                if (strtoupper((string) $trnType) === 'DEBIT') {
+                    $type = 'expense';
+                } elseif (strtoupper((string) $trnType) === 'CREDIT') {
+                    $type = 'income';
+                }
+
+                $description = preg_replace('/\s+/', ' ', trim($memo));
+
+                $transactions[] = [
+                    'date' => $date,
+                    'description' => $description,
+                    'amount' => abs($amount),
+                    'type' => $type,
+                    'external_id' => $fitId,
+                    // O FITID sozinho não identifica o lançamento: o Nubank repete o
+                    // mesmo id em transações relacionadas (o IOF herda o id da compra).
+                    // A chave inclui data, valor e descrição para ficar determinística.
+                    'external_ref' => sha1(implode('|', [
+                        (string) $fitId,
+                        $date,
+                        number_format(abs($amount), 2, '.', ''),
+                        $description,
+                    ])),
+                ];
+            }
+
+            Log::info("OFX processado: " . count($transactions) . " transações extraídas, {$ignored} ignoradas");
+        } catch (\Exception $e) {
+            Log::error('Erro ao processar OFX: ' . $e->getMessage(), [
+                'file_path' => $filePath,
+                'trace' => $e->getTraceAsString(),
+            ]);
+            throw new \RuntimeException('Erro ao processar arquivo OFX: ' . $e->getMessage());
+        }
+
+        return $transactions;
+    }
+
+    /**
+     * Lê o valor de uma tag OFX. No SGML do OFX 1.x o fechamento é opcional,
+     * então o valor termina na próxima tag ou quebra de linha.
+     */
+    private function extractOfxTag(string $block, string $tag): ?string
+    {
+        if (!preg_match('/<' . $tag . '>([^<
+
+]*)/i', $block, $match)) {
+            return null;
+        }
+
+        $value = trim($match[1]);
+
+        return $value === '' ? null : $value;
+    }
+
+    /**
+     * Converte DTPOSTED (YYYYMMDDHHMMSS[fuso:TZ]) para Y-m-d.
+     */
+    private function parseOfxDate(?string $value): ?string
+    {
+        if ($value === null || !preg_match('/^(\d{4})(\d{2})(\d{2})/', $value, $match)) {
+            return null;
+        }
+
+        try {
+            return Carbon::createFromFormat('Ymd', $match[1] . $match[2] . $match[3])
+                ->startOfDay()
+                ->toDateString();
+        } catch (\Exception $e) {
+            Log::warning("Data OFX inválida: {$value}");
+            return null;
+        }
+    }
+
+    /**
+     * Resolve o caminho do arquivo, que pode chegar relativo ao storage ou absoluto.
+     */
+    private function resolveFullPath(string $filePath): string
+    {
+        $candidates = [
+            storage_path('app/' . $filePath),
+            Storage::path($filePath),
+            $filePath,
+        ];
+
+        foreach ($candidates as $candidate) {
+            if (file_exists($candidate)) {
+                return $candidate;
+            }
+        }
+
+        throw new \RuntimeException("Arquivo não encontrado: {$filePath}");
     }
 
     /**

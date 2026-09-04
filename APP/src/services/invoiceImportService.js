@@ -1,17 +1,22 @@
 import api from './api'
 
 export const invoiceImportService = {
-  async uploadFile(file, bankName) {
+  async uploadFiles(files, bankName) {
     const formData = new FormData()
-    formData.append('file', file)
+    const list = Array.isArray(files) ? files : [files]
+    list.forEach((file) => formData.append('files[]', file))
     formData.append('bank_name', bankName)
-    
+
     const { data } = await api.post('/invoice-import/upload', formData, {
       headers: {
         'Content-Type': 'multipart/form-data',
       },
     })
     return data
+  },
+
+  async uploadFile(file, bankName) {
+    return this.uploadFiles([file], bankName)
   },
 
   async getPending(params = {}) {

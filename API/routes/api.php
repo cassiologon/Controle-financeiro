@@ -11,6 +11,7 @@ use App\Http\Controllers\RecurringTransactionController;
 use App\Http\Controllers\InvoiceImportController;
 use App\Http\Controllers\InvoiceConfigController;
 use App\Http\Controllers\InsightController;
+use App\Http\Controllers\TransactionCategorizationController;
 
 // Public routes
 Route::post('/auth/register', [AuthController::class, 'register']);
@@ -23,6 +24,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::apiResource('categories', CategoryController::class);
     Route::get('/transactions/banks', [TransactionController::class, 'getBanks']);
+    Route::post('/transactions/ai-suggestions', [TransactionCategorizationController::class, 'suggest']);
+    Route::post('/transactions/ai-suggestions/apply', [TransactionCategorizationController::class, 'apply']);
     Route::delete('/transactions/delete-all', [TransactionController::class, 'deleteAll']);
     Route::apiResource('transactions', TransactionController::class);
     Route::apiResource('budgets', BudgetController::class);
